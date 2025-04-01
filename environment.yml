@@ -1,0 +1,20 @@
+name: "RL"
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - gymnasium[toy-text]
+      - stable-baselines3
+      - opencv-python
+      - matplotlib
+      - pandas
+      - seaborn
+      - tqdm
+      - jupyterlab
+      - ipykernel
+      - ipywidgets
+      - highway-env
+      - pytest
