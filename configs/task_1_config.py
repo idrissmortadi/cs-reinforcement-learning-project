@@ -1,5 +1,11 @@
 import pickle
 
+import gymnasium as gym
+import highway_env  # noqa: F401
+
+# Discrete version
+ENVIRONEMNT = "highway-fast-v0"
+
 config_dict = {
     "observation": {
         "type": "OccupancyGrid",
@@ -50,6 +56,5 @@ if __name__ == "__main__":
     with open("config.pkl", "wb") as f:
         pickle.dump(config_dict, f)
 
-    # env = gym.make("highway-fast-v0", render_mode="rgb_array")
-    # env.unwrapped.configure(config_dict)
-    # print(env.reset())
+    env = gym.make(ENVIRONEMNT, render_mode="rgb_array")
+    env.unwrapped.configure(config_dict)

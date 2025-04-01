@@ -1,3 +1,5 @@
+ENVIRONMENT = "racetrack-v0"
+
 config_dict = {
     "observation": {
         "type": "OccupancyGrid",

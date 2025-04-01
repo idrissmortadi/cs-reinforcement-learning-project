@@ -1,4 +1,8 @@
-import pickle
+import gymnasium as gym
+import highway_env  # noqa: F401
+
+# Continuous version
+ENVIRONMENT = "highway-fast-v0"
 
 config_dict = {
     "observation": {
@@ -47,9 +51,17 @@ config_dict = {
 
 if __name__ == "__main__":
     # Save the config_dict to a pickle file
-    with open("config.pkl", "wb") as f:
-        pickle.dump(config_dict, f)
+    # with open("config.pkl", "wb") as f:
+    #     pickle.dump(config_dict, f)
 
-    # env = gym.make("highway-fast-v0", render_mode="rgb_array")
-    # env.unwrapped.configure(config_dict)
+    env = gym.make("highway-fast-v0", render_mode="rgb_array")
+    env.unwrapped.configure(config_dict)
+
+    # Print info
+    print("Environment info:")
+    print(env.spec)
     # print(env.reset())
+    print(env.action_space)
+    print(env.observation_space)
+    print(env.action_space.sample())
+    print(env.observation_space.sample())
