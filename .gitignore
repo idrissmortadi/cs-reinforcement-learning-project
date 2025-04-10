@@ -1,3 +1,13 @@
+# model files
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tar
+*.zip
+*.npy
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
