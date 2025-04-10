@@ -53,7 +53,7 @@ config_dict = {
 
 if __name__ == "__main__":
     # Save the config_dict to a pickle file
-    with open("config.pkl", "wb") as f:
+    with open("task1_config.pkl", "wb") as f:
         pickle.dump(config_dict, f)
 
     env = gym.make(ENVIRONEMNT, render_mode="rgb_array")

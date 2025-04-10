@@ -1,3 +1,8 @@
+import pickle
+
+import gymnasium as gym
+import highway_env  # noqa: F401
+
 ENVIRONMENT = "racetrack-v0"
 
 config_dict = {
@@ -26,3 +31,12 @@ config_dict = {
     "render_agent": True,
     "offscreen_rendering": False,
 }
+
+if __name__ == "__main__":
+    # Save the config_dict to a pickle file
+    with open("task3_config.pkl", "wb") as f:
+        pickle.dump(config_dict, f)
+
+    env = gym.make(ENVIRONMENT, render_mode="rgb_array")
+    env.unwrapped.configure(config_dict)
+    env.reset()
