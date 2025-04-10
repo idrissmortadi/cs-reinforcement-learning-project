@@ -54,7 +54,8 @@ cover/
 # Translations
 *.mo
 *.pot
-
+model.zip
+racetrack_ppo
 # Django stuff:
 *.log
 local_settings.py

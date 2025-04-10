@@ -22,7 +22,7 @@ config_dict = {
     "lane_centering_cost": 4,
     "action_reward": -0.3,
     "controlled_vehicles": 1,
-    "other_vehicles": 1,
+    "other_vehicles": 3,
     "screen_width": 600,
     "screen_height": 600,
     "centering_position": [0.5, 0.5],
