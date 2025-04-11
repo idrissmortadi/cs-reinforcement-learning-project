@@ -20,6 +20,7 @@ import datetime
 import logging
 import os
 import random
+import signal  # For handling Ctrl+C
 import sys
 
 # For accessing the config module;
@@ -67,15 +68,15 @@ def preprocess_state(state):
 
 
 # DQN Hyperparameters
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 GAMMA = 0.99  # Discount factor for future rewards
 LR = 1e-3  # Learning rate for the optimizer
 EPS_START = 1.0  # Initial value of epsilon for the epsilon-greedy policy
 EPS_END = 0.05  # Minimum value of epsilon for the epsilon-greedy policy
 EPS_DECAY = 0.995  # Decay rate for epsilon after each episode
-TARGET_UPDATE = 10  # Number of episodes between updates of the target network
-MEMORY_SIZE = 10000  # Maximum capacity of the replay buffer
-NUM_EPISODES = 500  # Total number of episodes for training
+TARGET_UPDATE = 5_000  # Number of episodes between updates of the target network
+MEMORY_SIZE = 50_000  # Maximum capacity of the replay buffer
+NUM_EPISODES = 50_000  # Total number of episodes for training
 
 # Determine input dimension from a sample observation
 state, _ = env.reset()
@@ -114,6 +115,7 @@ class QNetwork(nn.Module):
         super(QNetwork, self).__init__()
         self.layer1 = nn.Linear(input_dim, 128)
         self.layer2 = nn.Linear(128, 128)
+        self.layer3 = nn.Linear(128, 128)
         self.output_layer = nn.Linear(128, n_actions)
 
     def forward(self, x):
@@ -129,6 +131,7 @@ class QNetwork(nn.Module):
         logging.debug(f"Input to QNetwork forward pass: {x.shape}")
         x = torch.relu(self.layer1(x))
         x = torch.relu(self.layer2(x))
+        x = torch.relu(self.layer3(x))
         return self.output_layer(x)
 
 
@@ -215,7 +218,7 @@ def select_action(state, policy_net, epsilon):
             return action
 
 
-def optimize_model(policy_net, target_net, optimizer, memory):
+def optimize_model(policy_net, target_net, optimizer, memory, writer=None, step=None):
     """
     Perform a single optimization step on the policy network.
 
@@ -224,6 +227,8 @@ def optimize_model(policy_net, target_net, optimizer, memory):
         target_net (QNetwork): Target network.
         optimizer (torch.optim.Optimizer): Optimizer for the policy network.
         memory (ReplayBuffer): Replay buffer.
+        writer (SummaryWriter, optional): TensorBoard writer for logging. Defaults to None.
+        step (int, optional): Current training step for logging. Defaults to None.
 
     Returns:
         float: Loss value if optimization is performed, otherwise None.
@@ -264,6 +269,12 @@ def optimize_model(policy_net, target_net, optimizer, memory):
     loss.backward()
     optimizer.step()
 
+    # Log Q-value magnitudes to TensorBoard
+    if writer and step is not None:
+        writer.add_scalar("Q-Values/Max", q_values.max().item(), step)
+        writer.add_scalar("Q-Values/Min", q_values.min().item(), step)
+        writer.add_scalar("Q-Values/Mean", q_values.mean().item(), step)
+
     return loss_value
 
 
@@ -275,7 +286,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(METRICS_DIR, exist_ok=True)
 
 
-def record_agent(policy_net, env, video_folder, num_eval_episodes=4):
+def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
     """
     Record a video of the trained agent's performance.
 
@@ -283,19 +294,19 @@ def record_agent(policy_net, env, video_folder, num_eval_episodes=4):
         policy_net (QNetwork): Trained policy network.
         env (gym.Env): Environment to evaluate the agent.
         video_folder (str): Directory to save the video.
+        run_name (str): Name of the current run for organizing videos.
         num_eval_episodes (int): Number of episodes to record.
     """
-    # Ensure a unique video folder to avoid overwriting
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    unique_video_folder = f"{video_folder}_{timestamp}"
-    logging.info(f"Recording videos to folder: {unique_video_folder}")
+    # Create a subdirectory for the current run's videos
+    run_video_folder = os.path.join(video_folder, run_name)
+    os.makedirs(run_video_folder, exist_ok=True)
+    logging.info(f"Recording videos to folder: {run_video_folder}")
     env = RecordVideo(
         env,
-        video_folder=unique_video_folder,
+        video_folder=run_video_folder,
         name_prefix="eval",
-        episode_trigger=lambda x: True,
-        step_trigger=lambda x: x % 2
-        == 0,  # Record every second step to increase framerate
+        fps=10,
+        episode_trigger=lambda episode_id: True,  # Record all episodes
     )
     env = RecordEpisodeStatistics(env, buffer_length=num_eval_episodes)
 
@@ -343,8 +354,7 @@ def record_agent(policy_net, env, video_folder, num_eval_episodes=4):
         )
 
     env.close()
-    logging.info(f"Video recording completed. Videos saved to: {unique_video_folder}")
-    print(f"Episode time taken: {env.time_queue}")
+    logging.info(f"Video recording completed. Videos saved to: {run_video_folder}")
     print(f"Episode total rewards: {env.return_queue}")
     print(f"Episode lengths: {env.length_queue}")
 
@@ -365,6 +375,78 @@ def get_run_name(custom_name=None):
     return f"DQN_lr{LR}_bs{BATCH_SIZE}_gamma{GAMMA}_eps{EPS_START}-{EPS_END}_mem{MEMORY_SIZE}_{timestamp}"
 
 
+# Global variable to track if training should stop
+stop_training = False
+training_started = False
+
+
+def signal_handler(sig, frame):
+    """
+    Handle Ctrl+C signal to save a model checkpoint and stop training.
+    """
+    global stop_training
+    global training_started
+    # Set stop_training to True if training has started
+    stop_training = True and training_started
+    if stop_training:
+        logging.info("Training has been interrupted. Saving model checkpoint...")
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
+
+def list_checkpoints(model_dir):
+    """
+    List all available checkpoints in the model directory.
+
+    Args:
+        model_dir (str): Directory containing model checkpoints.
+
+    Returns:
+        List[str]: List of checkpoint filenames.
+    """
+    return [f for f in os.listdir(model_dir) if f.endswith(".pth")]
+
+
+def load_checkpoint(policy_net, model_dir):
+    """
+    Prompt the user to select a checkpoint to load.
+
+    Args:
+        policy_net (QNetwork): Policy network to load the checkpoint into.
+        model_dir (str): Directory containing model checkpoints.
+
+    Returns:
+        QNetwork: Policy network with loaded weights.
+    """
+    checkpoints = list_checkpoints(model_dir)
+    if not checkpoints:
+        logging.info("No checkpoints found. Starting from scratch.")
+        return policy_net
+
+    print("Available checkpoints:")
+    for i, checkpoint in enumerate(checkpoints, 1):
+        print(f"{i}. {checkpoint}")
+
+    while True:
+        try:
+            choice = int(
+                input("Select a checkpoint to load (enter number or 0 to skip): ")
+            )
+            if 1 <= choice <= len(checkpoints):
+                checkpoint_path = os.path.join(model_dir, checkpoints[choice - 1])
+                policy_net.load_state_dict(torch.load(checkpoint_path))
+                logging.info(f"Loaded checkpoint: {checkpoints[choice - 1]}")
+                return policy_net
+            elif choice == 0:
+                print("Starting from scratch without loading a checkpoint.")
+                return policy_net
+            else:
+                print("Invalid choice. Please select a valid number.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+
 def main():
     """
     Main training loop for the DQN agent.
@@ -374,8 +456,11 @@ def main():
     - Periodically saves metrics and the trained model.
     - Records a video of the trained agent's performance.
     """
+    global training_started
+
     policy_net = QNetwork(input_dim, n_actions).to(device)
     target_net = QNetwork(input_dim, n_actions).to(device)
+    policy_net = load_checkpoint(policy_net, MODEL_DIR)  # Load checkpoint if available
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
 
@@ -427,8 +512,18 @@ def main():
     all_episode_rewards = []
     all_losses = []
     avg_window = 20  # For moving average
+    step = 0  # Initialize step counter
 
+    training_started = True
     for episode in range(1, NUM_EPISODES + 1):
+        if stop_training:  # Check if Ctrl+C was pressed
+            checkpoint_path = os.path.join(
+                MODEL_DIR, f"checkpoint_episode_{episode}.pth"
+            )
+            torch.save(policy_net.state_dict(), checkpoint_path)
+            logging.info(f"Checkpoint saved: {checkpoint_path}")
+            break
+
         logging.info(f"--- Episode {episode} started ---")
         state, _ = env.reset()
         state = torch.tensor(preprocess_state(state), device=device)
@@ -452,11 +547,17 @@ def main():
             )
 
             # Capture loss during optimization
-            loss = optimize_model(policy_net, target_net, optimizer, memory)
+            loss = optimize_model(
+                policy_net, target_net, optimizer, memory, writer, step
+            )
             if loss is not None:
                 episode_losses.append(loss)
 
+            step += 1  # Increment step counter
+
         epsilon = max(EPS_END, epsilon * EPS_DECAY)
+        writer.add_scalar("Epsilon", epsilon, episode)  # Log epsilon to TensorBoard
+
         if episode % TARGET_UPDATE == 0:
             target_net.load_state_dict(policy_net.state_dict())
             logging.info("Target network updated")
@@ -482,16 +583,9 @@ def main():
                 f"Episode {episode} | Reward: {total_reward:.2f} | Epsilon: {epsilon:.3f}"
             )
 
-        # Optional: Save metrics periodically
-        if episode % 50 == 0:
-            np.save(
-                os.path.join(METRICS_DIR, "rewards.npy"), np.array(all_episode_rewards)
-            )
-            if all_losses:
-                np.save(os.path.join(METRICS_DIR, "losses.npy"), np.array(all_losses))
-
     logging.info("Saving trained model")
-    torch.save(policy_net.state_dict(), os.path.join(MODEL_DIR, "dqn_policy_net.pth"))
+    model_filename = f"dqn_policy_net_{run_name}.pth"
+    torch.save(policy_net.state_dict(), os.path.join(MODEL_DIR, model_filename))
     env.close()
 
     # Save final metrics
@@ -503,7 +597,7 @@ def main():
     writer.close()
 
     # Record a video of the trained agent
-    logging.info("Recording agent's performance")
+    logging.info("")
 
     # Recreate environment for video recording
 
@@ -515,6 +609,7 @@ def main():
         policy_net,
         env_eval,
         video_folder=os.path.join(SAVE_DIR, "videos"),
+        run_name=run_name,
     )
 
 
