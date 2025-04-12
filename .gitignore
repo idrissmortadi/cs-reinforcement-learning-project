@@ -7,6 +7,10 @@
 *.zip
 *.npy
 
+# Tensorboard
+#  TensorBoard log files
+tensorboard/
+
 # Videos
 *.mp4
 *.avi

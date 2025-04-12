@@ -68,15 +68,15 @@ def preprocess_state(state):
 
 
 # DQN Hyperparameters
-BATCH_SIZE = 256
+BATCH_SIZE = 64  # Batch size for training
 GAMMA = 0.99  # Discount factor for future rewards
-LR = 1e-3  # Learning rate for the optimizer
+LR = 1e-4  # Learning rate for the optimizer
 EPS_START = 1.0  # Initial value of epsilon for the epsilon-greedy policy
 EPS_END = 0.05  # Minimum value of epsilon for the epsilon-greedy policy
 EPS_DECAY = 0.995  # Decay rate for epsilon after each episode
-TARGET_UPDATE = 5_000  # Number of episodes between updates of the target network
-MEMORY_SIZE = 50_000  # Maximum capacity of the replay buffer
-NUM_EPISODES = 50_000  # Total number of episodes for training
+TARGET_UPDATE = 1_000  # Number of episodes between updates of the target network
+MEMORY_SIZE = 10_000  # Maximum capacity of the replay buffer
+NUM_EPISODES = 5_000  # Total number of episodes for training
 
 # Determine input dimension from a sample observation
 state, _ = env.reset()
@@ -113,9 +113,8 @@ class QNetwork(nn.Module):
             n_actions (int): Number of possible actions.
         """
         super(QNetwork, self).__init__()
-        self.layer1 = nn.Linear(input_dim, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, 128)
+        self.layer1 = nn.Linear(input_dim, 512)
+        self.layer2 = nn.Linear(512, 128)
         self.output_layer = nn.Linear(128, n_actions)
 
     def forward(self, x):
@@ -131,7 +130,6 @@ class QNetwork(nn.Module):
         logging.debug(f"Input to QNetwork forward pass: {x.shape}")
         x = torch.relu(self.layer1(x))
         x = torch.relu(self.layer2(x))
-        x = torch.relu(self.layer3(x))
         return self.output_layer(x)
 
 
@@ -267,6 +265,10 @@ def optimize_model(policy_net, target_net, optimizer, memory, writer=None, step=
 
     optimizer.zero_grad()
     loss.backward()
+
+    # Apply gradient clipping
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), clip_value=1.0)
+
     optimizer.step()
 
     # Log Q-value magnitudes to TensorBoard
