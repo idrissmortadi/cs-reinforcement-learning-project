@@ -16,7 +16,7 @@ sys.path.append("..")
 from configs.task_3_config import config_dict
 
 TRAIN = True
-LOG_DIR = "racetrack_ppo"
+LOG_DIR = "racetrack_ppo_v2"
 MODEL_PATH = os.path.join(LOG_DIR, "model")
 VIDEO_DIR = os.path.join(LOG_DIR, "videos")
 
