@@ -18,7 +18,7 @@ config_dict = {
     "simulation_frequency": 15,
     "policy_frequency": 5,
     "duration": 300,
-    "collision_reward": -1,
+    "collision_reward": -5,
     "lane_centering_cost": 4,
     "action_reward": -0.3,
     "controlled_vehicles": 1,
