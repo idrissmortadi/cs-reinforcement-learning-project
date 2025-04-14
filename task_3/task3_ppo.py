@@ -36,7 +36,7 @@ if __name__ == "__main__":
     rollout_steps_per_env = 512  # Increased n_steps per environment
     learning_rate = 3e-4  # Reduced learning rate
     gamma = 0.99  # Increased discount factor
-    total_timesteps = int(2e6)  # Increased total training time (adjust as needed)
+    total_timesteps = int(2e5)  # Increased total training time (adjust as needed)
 
     # Create the vectorized environment
     env = make_vec_env(
@@ -50,17 +50,8 @@ if __name__ == "__main__":
     model = PPO(
         "MlpPolicy",
         env,
-        policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
-        n_steps=rollout_steps_per_env,  # Steps per env before update
-        batch_size=batch_size,  # Mini-batch size during update epochs
-        n_epochs=10,  # PPO internal update epochs
-        learning_rate=learning_rate,  # Adjusted learning rate
-        gamma=gamma,  # Adjusted discount factor
         verbose=1,
         tensorboard_log=LOG_DIR,
-        # ent_coef=0.0, # Default is usually 0.0, can adjust if needed
-        # vf_coef=0.5,  # Default is usually 0.5
-        # max_grad_norm=0.5, # Default is usually 0.5
     )
 
     # Training
