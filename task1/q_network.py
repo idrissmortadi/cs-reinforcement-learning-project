@@ -32,16 +32,6 @@ class QNetwork(nn.Module):
         self.layer2 = nn.Linear(128, 128)
         # Output layer: produces Q-value estimates for each action
         self.output_layer = nn.Linear(128, output_dim)
-        # Optional: Initialize weights for potentially better starting performance
-        # self._initialize_weights() # Uncomment to use custom initialization
-
-    def _initialize_weights(self):
-        """Initialize network weights using He initialization (good for ReLUs)."""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         """
