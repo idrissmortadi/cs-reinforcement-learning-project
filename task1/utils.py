@@ -2,7 +2,6 @@ import datetime
 import logging
 import os
 import random
-import signal
 
 import numpy as np
 import torch
@@ -35,10 +34,6 @@ def signal_handler(sig, frame):
         logging.warning("SIGINT received. Training will stop after this episode.")
     else:
         logging.warning("SIGINT received, but training hasn't started yet.")
-
-
-# Register the signal handler for SIGINT
-signal.signal(signal.SIGINT, signal_handler)
 
 
 def get_run_name(custom_name=None):
