@@ -44,6 +44,7 @@ class ReplayBuffer:
         """
         experience = Experience(state, action, reward, next_state, done)
         self.buffer.append(experience)
+        # logging.debug(f"Pushed experience to buffer. Current size: {len(self.buffer)}") # Optional: Debug logging
 
     def sample(self, batch_size):
         """
@@ -74,11 +75,16 @@ class ReplayBuffer:
         # Convert the lists into NumPy arrays for efficient processing
         # Ensure correct dtypes, especially for actions (long) and dones (float for calculations)
         states_np = np.array(states, dtype=np.float32)
-        actions_np = np.array(actions, dtype=np.int64)
+        actions_np = np.array(
+            actions, dtype=np.int64
+        )  # Use int64 for potential PyTorch indexing
         rewards_np = np.array(rewards, dtype=np.float32)
         next_states_np = np.array(next_states, dtype=np.float32)
-        dones_np = np.array(dones, dtype=np.float32)
+        dones_np = np.array(
+            dones, dtype=np.float32
+        )  # Use float32 for (1 - dones) calculation
 
+        # logging.debug(f"Sampled {batch_size} experiences from buffer.") # Optional: Debug logging
         return states_np, actions_np, rewards_np, next_states_np, dones_np
 
     def __len__(self):
