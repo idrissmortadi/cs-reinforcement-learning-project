@@ -365,25 +365,20 @@ def main():
     try:
         # Create a separate environment instance for evaluation/recording
         env_eval = gym.make(ENV_NAME, render_mode="rgb_array")
-        # NOTE: Ensure the evaluation environment also uses the potentially
-        # modified 'config_dict' (e.g., with increased 'duration')
-        # from 'configs/task_1_config.py' for consistency.
         env_eval.unwrapped.configure(config_dict)
         logging.info(f"Created evaluation environment: {ENV_NAME}")
 
         record_agent(
             policy_net=policy_net,
             env=env_eval,
-            video_folder=VIDEO_DIR,  # Use the dedicated video directory
+            video_folder=VIDEO_DIR,
             run_name=run_name,
-            num_eval_episodes=5,  # Record 5 episodes
+            num_eval_episodes=5,
         )
-        env_eval.close()  # Close the evaluation environment
+        env_eval.close()
         logging.info("Evaluation environment closed.")
     except Exception as e:
-        logging.error(
-            f"An error occurred during agent recording: {e}", exc_info=True
-        )  # Log traceback
+        logging.error(f"An error occurred during agent recording: {e}", exc_info=True)
 
     logging.info("--- Script Finished ---")
 

@@ -73,7 +73,7 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=5):
                 logging.error(
                     f"Observation size mismatch! Observation size: {obs.size}, Network input size: {expected_input_dim}."
                 )
-                # Handle mismatch - e.g., raise error, log warning, skip episode
+                # Handle mismatch
                 raise ValueError(
                     f"Observation size ({obs.size}) does not match network input dimension ({expected_input_dim}). Check preprocessing."
                 )
@@ -122,27 +122,16 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=5):
             logging.error(
                 f"Error during evaluation episode {episode_num + 1}: {e}", exc_info=True
             )
-            # Decide whether to continue with next episode or stop
-            # break # Example: stop evaluation if an error occurs
 
     # --- Post-Evaluation ---
     try:
-        # Access statistics collected by the wrapper
-        # Note: `env.return_queue` and `env.length_queue` might need adjustment
-        # depending on the exact Gymnasium version and wrapper behavior.
-        # It's safer to rely on the info dict if possible, or check wrapper documentation.
-        if hasattr(env, "return_queue"):
-            all_rewards = list(env.return_queue)
-            logging.info(f"Evaluation Episode Rewards: {all_rewards}")
-            print(
-                f"Evaluation Episode Rewards: {all_rewards}"
-            )  # Also print for visibility
-        if hasattr(env, "length_queue"):
-            all_lengths = list(env.length_queue)
-            logging.info(f"Evaluation Episode Lengths: {all_lengths}")
-            print(
-                f"Evaluation Episode Lengths: {all_lengths}"
-            )  # Also print for visibility
+        all_rewards = list(env.return_queue)
+        logging.info(f"Evaluation Episode Rewards: {all_rewards}")
+        print(f"Evaluation Episode Rewards: {all_rewards}")
+
+        all_lengths = list(env.length_queue)
+        logging.info(f"Evaluation Episode Lengths: {all_lengths}")
+        print(f"Evaluation Episode Lengths: {all_lengths}")
 
         if all_rewards:
             avg_reward = sum(all_rewards) / len(all_rewards)

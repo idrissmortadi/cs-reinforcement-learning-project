@@ -17,14 +17,8 @@ EPS_END = (
 EPS_DECAY = 0.995  # Multiplicative factor by which epsilon is reduced after each episode (e.g., 1.0 -> 0.995 -> 0.990, etc.).
 
 # === Replay Buffer ===
-MEMORY_SIZE = 100_000  # Maximum number of experiences (transitions) to store in the replay buffer.
+MEMORY_SIZE = 500_000  # Maximum number of experiences (transitions) to store in the replay buffer.
 
 # === Device Configuration ===
 # Automatically select CUDA (NVIDIA GPU) if available, otherwise use CPU.
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# === Environment Specific (Example - Can be moved or adjusted) ===
-# MAX_STEPS_PER_EPISODE = 1000 # Optional: Maximum number of steps allowed per episode
-
-# === Logging/Saving ===
-# SAVE_MODEL_EVERY = 100    # Optional: Frequency (in episodes) for saving model checkpoints

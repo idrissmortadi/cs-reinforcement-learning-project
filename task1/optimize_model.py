@@ -76,10 +76,9 @@ def optimize_model(
     # Get Q-values for all actions from the policy_net for the sampled states
     # Then, select the Q-value corresponding to the action actually taken in the experience
     q_values_all = policy_net(states_tensor)
+
     # gather() selects the Q-value based on the action index in actions_tensor
-    q_values_current = q_values_all.gather(1, actions_tensor).squeeze(
-        1
-    )  # Remove the added dimension
+    q_values_current = q_values_all.gather(1, actions_tensor).squeeze(1)
 
     # --- 4. Calculate Target Q-values: r + γ * max_a' Q_target(s', a') ---
     # Get the maximum Q-value for the next states from the target_net
@@ -106,44 +105,38 @@ def optimize_model(
 
     if logging:
         logging.debug(f"Loss calculated: {loss_value:.4f}")
-        # Log detailed Q-value stats occasionally if needed
-        # if step % 100 == 0: # Example: Log every 100 steps
-        #     logging.debug(f"Step {step} Q-value stats: Current Mean={q_values_current.mean().item():.3f}, Target Mean={expected_q_values.mean().item():.3f}")
+        # Log detailed Q-value stats occasionally
+        if step % 100 == 0:
+            logging.debug(
+                f"Step {step} Q-value stats: Current Mean={q_values_current.mean().item():.3f}, Target Mean={expected_q_values.mean().item():.3f}"
+            )
 
     # --- 6. Backpropagation and Optimization Step ---
-    optimizer.zero_grad()  # Reset gradients before backpropagation
-    loss.backward()  # Compute gradients of the loss w.r.t. policy_net parameters
+    optimizer.zero_grad()
+    loss.backward()
 
     # --- 7. Gradient Clipping (Optional but Recommended) ---
     # Prevents exploding gradients, improving training stability.
-    # torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0) # Clip by norm
-    torch.nn.utils.clip_grad_value_(
-        policy_net.parameters(), clip_value=100.0
-    )  # Clip by value
+    torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
     if logging:
-        # You could add more detailed gradient logging here if needed
-        # total_norm = 0
-        # for p in policy_net.parameters():
-        #     if p.grad is not None:
-        #         param_norm = p.grad.data.norm(2)
-        #         total_norm += param_norm.item() ** 2
-        # total_norm = total_norm ** 0.5
-        # logging.debug(f"Gradient norm before clipping: {total_norm:.4f}") # Requires clip_grad_norm_
+        # Log gradient norms for debugging
+        total_norm = 0
+        for p in policy_net.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm**0.5
+        logging.debug(f"Gradient norm before clipping: {total_norm:.4f}")
         logging.debug("Applied gradient clipping by value (100.0).")
 
     optimizer.step()  # Update policy_net weights based on computed gradients
 
     # --- 8. Logging to TensorBoard ---
     if writer and step is not None:
-        # Log loss per optimization step
-        # writer.add_scalar("Loss/Per_Step", loss_value, step) # Already logged in run.py loop
-
         # Log Q-value statistics to understand the scale and evolution of predicted values
         writer.add_scalar("Q-Values/Current_Max", q_values_current.max().item(), step)
         writer.add_scalar("Q-Values/Current_Min", q_values_current.min().item(), step)
         writer.add_scalar("Q-Values/Current_Mean", q_values_current.mean().item(), step)
-        writer.add_scalar(
-            "Q-Values/Target_Mean", expected_q_values.mean().item(), step
-        )  # Log mean target Q
+        writer.add_scalar("Q-Values/Target_Mean", expected_q_values.mean().item(), step)
 
     return loss_value
