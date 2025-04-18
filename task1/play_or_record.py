@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+import time  # Import the time module
 
 import gymnasium as gym
 import torch
@@ -49,9 +50,12 @@ def play_or_record(model_path, video_folder=None, live=False, num_episodes=5):
 
     if not live and video_folder:
         os.makedirs(video_folder, exist_ok=True)
-        env = RecordVideo(env, video_folder=video_folder, name_prefix="play_or_record")
+        env = RecordVideo(
+            env, video_folder=video_folder, name_prefix="play_or_record", fps=16
+        )
 
-    for episode in range(num_episodes):
+    episode = 0
+    while episode < num_episodes:
         logging.info(f"Starting episode {episode + 1}/{num_episodes}")
         state, _ = env.reset()
         state = preprocess_state(state).flatten()
@@ -70,7 +74,13 @@ def play_or_record(model_path, video_folder=None, live=False, num_episodes=5):
             done = terminated or truncated
             episode_reward += reward
 
+            # Add a small delay for live mode to slow down rendering
+            if live:
+                time.sleep(0.1)  # Adjust sleep duration as needed
+
         logging.info(f"Episode {episode + 1} finished with reward: {episode_reward}")
+        if not live:
+            episode += 1
 
     env.close()
 
