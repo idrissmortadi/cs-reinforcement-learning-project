@@ -21,6 +21,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+import signal
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -49,11 +51,15 @@ from utils import (
     load_checkpoint,
     preprocess_state,
     select_action,
+    signal_handler,
     stop_training,
 )
 
 # Import environment configuration
 from configs.task_1_config import ENVIRONEMNT, config_dict
+
+# Register the signal handler for SIGINT
+signal.signal(signal.SIGINT, signal_handler)
 
 # --- Logging Configuration ---
 logging.basicConfig(

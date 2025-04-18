@@ -40,6 +40,7 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=5):
             # episode_trigger=lambda ep_id: ep_id < num_eval_episodes, # Record only the specified number
             episode_trigger=lambda ep_id: True,  # Record all episodes run through this wrapper
             disable_logger=True,  # Disable default RecordVideo logger if desired
+            fps=16,  # Set frames per second for video playback
         )
         # Wrapper to automatically track episode statistics (return, length)
         env = RecordEpisodeStatistics(env, num_eval_episodes)
