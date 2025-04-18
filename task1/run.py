@@ -1,619 +1,396 @@
 """
-Deep Q-Learning implementation for a custom Gymnasium environment.
+Main script for training a Deep Q-Network (DQN) agent on a Highway-Env environment.
 
-This script trains a Deep Q-Network (DQN) agent to interact with an environment
-and learn an optimal policy. The environment and its configuration are defined
-in the `configs.task_1_config` module.
-
-Key Features:
-- Preprocessing of state observations.
-- Replay buffer for experience replay.
-- Epsilon-greedy policy for action selection.
-- Target network for stable training.
-- Periodic saving of rewards, losses, and the trained model.
-
-Usage:
-    python task1.py
+This script orchestrates the training process, including:
+- Environment setup using configurations from `configs.task_1_config`.
+- Initialization of the policy and target Q-networks, optimizer, and replay buffer.
+- Handling of potential checkpoint loading to resume training.
+- The main training loop, involving interaction with the environment, action selection (epsilon-greedy),
+  storing experiences, and optimizing the policy network.
+- Periodic updates of the target network.
+- Logging of training progress (rewards, losses, epsilon) using TensorBoard and console output.
+- Saving the final trained model and training metrics.
+- Recording evaluation episodes of the trained agent.
 """
 
-import datetime
 import logging
 import os
-import random
-import signal  # For handling Ctrl+C
 import sys
 
-# For accessing the config module;
-sys.path.append("..")
+# Add project root to Python path for module access
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from collections import deque
 
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
+from hyperparameters import (
+    BATCH_SIZE,
+    EPS_DECAY,
+    EPS_END,
+    EPS_START,
+    GAMMA,
+    LR,
+    MEMORY_SIZE,
+    NUM_EPISODES,
+    TARGET_UPDATE,
+    device,
+)
+from optimize_model import optimize_model
+from q_network import QNetwork
+from record_agent import record_agent
+from replay_buffer import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
-from configs.task_1_config import ENVIRONEMNT, config_dict
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+# Import utility functions
+from utils import (
+    get_run_name,
+    load_checkpoint,
+    preprocess_state,
+    select_action,
+    stop_training,
 )
 
-# Create environment using the config
-ENV_NAME = ENVIRONEMNT
-env = gym.make(ENV_NAME, render_mode="rgb_array")
-env.unwrapped.configure(config_dict)
+# Import environment configuration
+from configs.task_1_config import ENVIRONEMNT, config_dict
+
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,  # Set default logging level to INFO
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Log to standard output
+    ],
+)
+logging.info("--- Starting DQN Training Script ---")
+
+# --- Environment Setup ---
+try:
+    ENV_NAME = ENVIRONEMNT
+    env = gym.make(ENV_NAME, render_mode="rgb_array")
+    env.unwrapped.configure(config_dict)
+    logging.info(f"Successfully created and configured environment: {ENV_NAME}")
+except Exception as e:
+    logging.error(f"Failed to create or configure environment '{ENV_NAME}': {e}")
+    sys.exit(1)
 
 
-# If observations are dicts (for OccupancyGrid), flatten them
-def preprocess_state(state):
-    """
-    Preprocess the state observation by flattening it if it is a dictionary.
+# --- Determine State and Action Dimensions ---
+try:
+    state, _ = env.reset()
+    # Preprocess the initial state to get the correct shape
+    processed_state = preprocess_state(state)
+    # The input dimension for the Q-network is the size of the flattened state vector
+    input_dim = processed_state.size
+    logging.info(f"State preprocessed. Input dimension for Q-network: {input_dim}")
 
-    Args:
-        state (Union[dict, np.ndarray]): The raw state observation.
+    # Get the number of discrete actions from the environment's action space
+    n_actions = env.action_space.n
+    logging.info(f"Number of discrete actions: {n_actions}")
+except Exception as e:
+    logging.error(f"Failed to get state/action dimensions from environment: {e}")
+    env.close()
+    sys.exit(1)
 
-    Returns:
-        np.ndarray: The preprocessed state as a flattened NumPy array.
-    """
-    if isinstance(state, dict):
-        # Flatten state with sorted keys to ensure consistent ordering
-        state = np.concatenate(
-            [np.array(state[k]).flatten() for k in sorted(state.keys())]
-        )
-    return np.array(state, dtype=np.float32)
-
-
-# DQN Hyperparameters
-BATCH_SIZE = 64  # Batch size for training
-GAMMA = 0.99  # Discount factor for future rewards
-LR = 1e-4  # Learning rate for the optimizer
-EPS_START = 1.0  # Initial value of epsilon for the epsilon-greedy policy
-EPS_END = 0.05  # Minimum value of epsilon for the epsilon-greedy policy
-EPS_DECAY = 0.995  # Decay rate for epsilon after each episode
-TARGET_UPDATE = 1_000  # Number of episodes between updates of the target network
-MEMORY_SIZE = 10_000  # Maximum capacity of the replay buffer
-NUM_EPISODES = 5_000  # Total number of episodes for training
-
-# Determine input dimension from a sample observation
-state, _ = env.reset()
-state = preprocess_state(state)
-input_dim = (
-    state.flatten().size
-)  # Ensure the state is flattened before calculating size
-logging.debug(f"Calculated input_dim: {input_dim}")
-
-# Determine number of actions (for discrete action space)
-n_actions = env.action_space.n
-
-# Check for GPU availability
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# --- Device Selection ---
 logging.info(f"Using device: {device}")
+if device == "cuda":
+    logging.info(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
 
-
-class QNetwork(nn.Module):
-    """
-    Neural network for approximating the Q-value function.
-
-    Attributes:
-        layer1 (nn.Linear): First fully connected layer.
-        layer2 (nn.Linear): Second fully connected layer.
-        output_layer (nn.Linear): Output layer for Q-values.
-    """
-
-    def __init__(self, input_dim, n_actions):
-        """
-        Initialize the QNetwork.
-
-        Args:
-            input_dim (int): Dimension of the input state.
-            n_actions (int): Number of possible actions.
-        """
-        super(QNetwork, self).__init__()
-        self.layer1 = nn.Linear(input_dim, 512)
-        self.layer2 = nn.Linear(512, 128)
-        self.output_layer = nn.Linear(128, n_actions)
-
-    def forward(self, x):
-        """
-        Perform a forward pass through the network.
-
-        Args:
-            x (torch.Tensor): Input tensor representing the state.
-
-        Returns:
-            torch.Tensor: Output tensor representing Q-values for each action.
-        """
-        logging.debug(f"Input to QNetwork forward pass: {x.shape}")
-        x = torch.relu(self.layer1(x))
-        x = torch.relu(self.layer2(x))
-        return self.output_layer(x)
-
-
-class ReplayBuffer:
-    """
-    Replay buffer for storing and sampling experiences.
-
-    Attributes:
-        buffer (deque): A deque to store experiences with a fixed capacity.
-    """
-
-    def __init__(self, capacity):
-        """
-        Initialize the replay buffer.
-
-        Args:
-            capacity (int): Maximum number of experiences to store.
-        """
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state, action, reward, next_state, done):
-        """
-        Add a new experience to the buffer.
-
-        Args:
-            state (np.ndarray): Current state.
-            action (int): Action taken.
-            reward (float): Reward received.
-            next_state (np.ndarray): Next state.
-            done (bool): Whether the episode is done.
-        """
-        self.buffer.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        """
-        Sample a batch of experiences from the buffer.
-
-        Args:
-            batch_size (int): Number of experiences to sample.
-
-        Returns:
-            Tuple[np.ndarray]: Batch of states, actions, rewards, next_states, and dones.
-        """
-        sample = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = map(np.array, zip(*sample))
-        return states, actions, rewards, next_states, dones
-
-    def __len__(self):
-        """
-        Get the current size of the buffer.
-
-        Returns:
-            int: Number of experiences in the buffer.
-        """
-        return len(self.buffer)
-
-
-def select_action(state, policy_net, epsilon):
-    """
-    Select an action using an epsilon-greedy policy.
-
-    Args:
-        state (np.ndarray): Current state.
-        policy_net (QNetwork): Policy network.
-        epsilon (float): Exploration rate.
-
-    Returns:
-        int: Selected action.
-    """
-    logging.debug(f"State shape before converting to tensor: {state.shape}")
-    if random.random() < epsilon:
-        action = random.randrange(n_actions)
-        logging.debug(f"Random action selected: {action}")
-        return action
-    else:
-        with torch.no_grad():
-            state_tensor = (
-                torch.tensor(state, device=device).unsqueeze(0).view(1, -1)
-            )  # Flatten the state
-            logging.debug(f"State tensor shape: {state_tensor.shape}")
-            q_values = policy_net(state_tensor)
-            action = q_values.argmax().item()
-            logging.debug(f"Greedy action selected: {action}")
-            return action
-
-
-def optimize_model(policy_net, target_net, optimizer, memory, writer=None, step=None):
-    """
-    Perform a single optimization step on the policy network.
-
-    Args:
-        policy_net (QNetwork): Policy network.
-        target_net (QNetwork): Target network.
-        optimizer (torch.optim.Optimizer): Optimizer for the policy network.
-        memory (ReplayBuffer): Replay buffer.
-        writer (SummaryWriter, optional): TensorBoard writer for logging. Defaults to None.
-        step (int, optional): Current training step for logging. Defaults to None.
-
-    Returns:
-        float: Loss value if optimization is performed, otherwise None.
-    """
-    if len(memory) < BATCH_SIZE:
-        return None
-
-    states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
-
-    states = torch.tensor(states, dtype=torch.float32, device=device).view(
-        BATCH_SIZE, -1
-    )  # Flatten and set dtype
-    actions = torch.tensor(
-        actions, dtype=torch.long, device=device
-    )  # Actions should be long for indexing
-    rewards = torch.tensor(
-        rewards, dtype=torch.float32, device=device
-    )  # Set dtype to float32
-    next_states = torch.tensor(next_states, dtype=torch.float32, device=device).view(
-        BATCH_SIZE, -1
-    )  # Flatten and set dtype
-    dones = torch.tensor(
-        dones, dtype=torch.float32, device=device
-    )  # Set dtype to float32
-
-    # Compute Q-values for current states
-    q_values = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-
-    # Compute Q-values for next states from target network
-    next_q_values = target_net(next_states).max(1)[0]
-    expected_q_values = rewards + GAMMA * next_q_values * (1 - dones)
-
-    loss = nn.MSELoss()(q_values, expected_q_values.detach())
-    loss_value = loss.item()
-    logging.debug(f"Loss: {loss_value}")
-
-    optimizer.zero_grad()
-    loss.backward()
-
-    # Apply gradient clipping
-    torch.nn.utils.clip_grad_value_(policy_net.parameters(), clip_value=1.0)
-
-    optimizer.step()
-
-    # Log Q-value magnitudes to TensorBoard
-    if writer and step is not None:
-        writer.add_scalar("Q-Values/Max", q_values.max().item(), step)
-        writer.add_scalar("Q-Values/Min", q_values.min().item(), step)
-        writer.add_scalar("Q-Values/Mean", q_values.mean().item(), step)
-
-    return loss_value
-
-
-# Create directories for saving models and metrics
+# --- Directory Setup ---
 SAVE_DIR = "results"
 MODEL_DIR = os.path.join(SAVE_DIR, "models")
 METRICS_DIR = os.path.join(SAVE_DIR, "metrics")
+VIDEO_DIR = os.path.join(SAVE_DIR, "videos")
+TENSORBOARD_DIR = os.path.join(SAVE_DIR, "tensorboard")
+
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(METRICS_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
+os.makedirs(TENSORBOARD_DIR, exist_ok=True)
+logging.info(
+    f"Ensured directories exist: {MODEL_DIR}, {METRICS_DIR}, {VIDEO_DIR}, {TENSORBOARD_DIR}"
+)
 
 
-def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
-    """
-    Record a video of the trained agent's performance.
-
-    Args:
-        policy_net (QNetwork): Trained policy network.
-        env (gym.Env): Environment to evaluate the agent.
-        video_folder (str): Directory to save the video.
-        run_name (str): Name of the current run for organizing videos.
-        num_eval_episodes (int): Number of episodes to record.
-    """
-    # Create a subdirectory for the current run's videos
-    run_video_folder = os.path.join(video_folder, run_name)
-    os.makedirs(run_video_folder, exist_ok=True)
-    logging.info(f"Recording videos to folder: {run_video_folder}")
-    env = RecordVideo(
-        env,
-        video_folder=run_video_folder,
-        name_prefix="eval",
-        fps=10,
-        episode_trigger=lambda episode_id: True,  # Record all episodes
-    )
-    env = RecordEpisodeStatistics(env, buffer_length=num_eval_episodes)
-
-    for episode_num in range(num_eval_episodes):
-        logging.info(
-            f"Starting evaluation episode {episode_num + 1}/{num_eval_episodes}"
-        )
-        obs, info = env.reset()
-        obs = preprocess_state(obs).flatten()  # Ensure the observation is flattened
-        logging.debug(f"Initial observation: {obs}")
-
-        # Dynamically verify input dimension
-        if obs.size != policy_net.layer1.in_features:
-            raise ValueError(
-                f"Mismatch between observation size ({obs.size}) and policy network input size ({policy_net.layer1.in_features})."
-            )
-
-        episode_over = False
-        total_reward = 0
-        step_count = 0
-
-        while not episode_over:
-            with torch.no_grad():
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).view(
-                    1, -1
-                )  # Ensure tensor matches input_dim
-                logging.debug(f"Input to QNetwork forward pass: {obs_tensor.shape}")
-                action = policy_net(obs_tensor).argmax().item()
-                logging.debug(f"Step {step_count}: Action selected: {action}")
-
-            obs, reward, terminated, truncated, info = env.step(action)
-            obs = preprocess_state(
-                obs
-            ).flatten()  # Ensure the next observation is flattened
-            total_reward += reward
-            step_count += 1
-            logging.debug(
-                f"Step {step_count}: Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}"
-            )
-
-            episode_over = terminated or truncated
-
-        logging.info(
-            f"Episode {episode_num + 1} completed. Total reward: {total_reward}, Steps: {step_count}"
-        )
-
-    env.close()
-    logging.info(f"Video recording completed. Videos saved to: {run_video_folder}")
-    print(f"Episode total rewards: {env.return_queue}")
-    print(f"Episode lengths: {env.length_queue}")
-
-
-def get_run_name(custom_name=None):
-    """
-    Generate a descriptive name for the current experiment run.
-
-    Args:
-        custom_name (str, optional): Custom name provided by the user. Defaults to None.
-
-    Returns:
-        str: Generated run name.
-    """
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    if custom_name:
-        return f"{custom_name}_{timestamp}"
-    return f"DQN_lr{LR}_bs{BATCH_SIZE}_gamma{GAMMA}_eps{EPS_START}-{EPS_END}_mem{MEMORY_SIZE}_{timestamp}"
-
-
-# Global variable to track if training should stop
-stop_training = False
-training_started = False
-
-
-def signal_handler(sig, frame):
-    """
-    Handle Ctrl+C signal to save a model checkpoint and stop training.
-    """
-    global stop_training
-    global training_started
-    # Set stop_training to True if training has started
-    stop_training = True and training_started
-    if stop_training:
-        logging.info("Training has been interrupted. Saving model checkpoint...")
-
-
-signal.signal(signal.SIGINT, signal_handler)
-
-
-def list_checkpoints(model_dir):
-    """
-    List all available checkpoints in the model directory.
-
-    Args:
-        model_dir (str): Directory containing model checkpoints.
-
-    Returns:
-        List[str]: List of checkpoint filenames.
-    """
-    return [f for f in os.listdir(model_dir) if f.endswith(".pth")]
-
-
-def load_checkpoint(policy_net, model_dir):
-    """
-    Prompt the user to select a checkpoint to load.
-
-    Args:
-        policy_net (QNetwork): Policy network to load the checkpoint into.
-        model_dir (str): Directory containing model checkpoints.
-
-    Returns:
-        QNetwork: Policy network with loaded weights.
-    """
-    checkpoints = list_checkpoints(model_dir)
-    if not checkpoints:
-        logging.info("No checkpoints found. Starting from scratch.")
-        return policy_net
-
-    print("Available checkpoints:")
-    for i, checkpoint in enumerate(checkpoints, 1):
-        print(f"{i}. {checkpoint}")
-
-    while True:
-        try:
-            choice = int(
-                input("Select a checkpoint to load (enter number or 0 to skip): ")
-            )
-            if 1 <= choice <= len(checkpoints):
-                checkpoint_path = os.path.join(model_dir, checkpoints[choice - 1])
-                policy_net.load_state_dict(torch.load(checkpoint_path))
-                logging.info(f"Loaded checkpoint: {checkpoints[choice - 1]}")
-                return policy_net
-            elif choice == 0:
-                print("Starting from scratch without loading a checkpoint.")
-                return policy_net
-            else:
-                print("Invalid choice. Please select a valid number.")
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-
-
+# --- Main Training Function ---
 def main():
     """
-    Main training loop for the DQN agent.
+    Main function to run the DQN training loop.
 
-    - Initializes the environment, networks, optimizer, and replay buffer.
-    - Runs episodes to train the agent.
-    - Periodically saves metrics and the trained model.
-    - Records a video of the trained agent's performance.
+    Initializes networks, optimizer, memory buffer, and TensorBoard.
+    Handles checkpoint loading. Executes the training episodes, performs optimization,
+    updates the target network, logs progress, and saves results. Finally, records
+    evaluation episodes.
     """
+    # Use global flags defined in utils.py for signal handling
     global training_started
+    global stop_training
 
+    # --- Initialization ---
+    logging.info("Initializing networks, optimizer, and replay buffer...")
+    # Policy network: learns the Q-values and decides actions
     policy_net = QNetwork(input_dim, n_actions).to(device)
+    # Target network: provides stable targets for Q-value updates
     target_net = QNetwork(input_dim, n_actions).to(device)
-    policy_net = load_checkpoint(policy_net, MODEL_DIR)  # Load checkpoint if available
-    target_net.load_state_dict(policy_net.state_dict())
-    target_net.eval()
 
+    # Load checkpoint if available and user chooses to
+    policy_net = load_checkpoint(policy_net, MODEL_DIR)
+
+    # Initialize target network with the same weights as the policy network
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()  # Set target network to evaluation mode (no gradient calculation)
+    logging.info("Policy and Target networks initialized.")
+
+    # Optimizer for updating the policy network's weights
     optimizer = optim.Adam(policy_net.parameters(), lr=LR)
+    logging.info(f"Optimizer initialized: Adam with LR={LR}")
+
+    # Replay buffer to store experiences (state, action, reward, next_state, done)
     memory = ReplayBuffer(MEMORY_SIZE)
+    logging.info(f"Replay buffer initialized with capacity: {MEMORY_SIZE}")
+
+    # Initial exploration rate
     epsilon = EPS_START
 
-    # Ask user for a custom run name
+    # --- TensorBoard Setup ---
+    # Ask user for a custom run name (optional)
     custom_run_name = input(
-        "Enter a custom run name (or press Enter to use default): "
+        "Enter a custom run name (or press Enter for default): "
     ).strip()
     run_name = get_run_name(custom_run_name if custom_run_name else None)
-
-    # Initialize TensorBoard writer
-    log_dir = os.path.join(SAVE_DIR, "tensorboard", run_name)
+    log_dir = os.path.join(TENSORBOARD_DIR, run_name)
     writer = SummaryWriter(log_dir=log_dir)
-    print(f"TensorBoard run name: {run_name}")
+    logging.info(f"TensorBoard logging initialized. Run name: {run_name}")
+    logging.info(f"Logs will be saved to: {log_dir}")
+    print(f"--- TensorBoard Run Name: {run_name} ---")  # Also print for easy copying
 
-    # Log hyperparameters to TensorBoard
-    writer.add_hparams(
-        {
-            "learning_rate": LR,
-            "batch_size": BATCH_SIZE,
-            "gamma": GAMMA,
-            "epsilon_start": EPS_START,
-            "epsilon_end": EPS_END,
-            "epsilon_decay": EPS_DECAY,
-            "target_update": TARGET_UPDATE,
-            "memory_size": MEMORY_SIZE,
-            "num_episodes": NUM_EPISODES,
-        },
-        {},
-    )
+    # Log hyperparameters to TensorBoard for tracking experiment setup
+    hparams = {
+        "learning_rate": LR,
+        "batch_size": BATCH_SIZE,
+        "gamma": GAMMA,
+        "epsilon_start": EPS_START,
+        "epsilon_end": EPS_END,
+        "epsilon_decay": EPS_DECAY,
+        "target_update_freq": TARGET_UPDATE,
+        "memory_size": MEMORY_SIZE,
+        "num_episodes": NUM_EPISODES,
+        "environment": ENV_NAME,
+    }
+    # Using add_text to log hyperparameters as markdown for better readability in TensorBoard
+    hparams_table = "| Hyperparameter | Value |\n|---|---|\n"
+    for key, value in hparams.items():
+        hparams_table += f"| {key} | {value} |\n"
+    writer.add_text("Hyperparameters", hparams_table, 0)
+    logging.info("Logged hyperparameters to TensorBoard.")
 
-    # Also save the run configuration to a file for reference
-    with open(os.path.join(log_dir, "config.txt"), "w") as f:
-        f.write(f"Environment: {ENV_NAME}\n")
-        f.write(f"Learning Rate: {LR}\n")
-        f.write(f"Batch Size: {BATCH_SIZE}\n")
-        f.write(f"Gamma: {GAMMA}\n")
-        f.write(f"Epsilon Start: {EPS_START}\n")
-        f.write(f"Epsilon End: {EPS_END}\n")
-        f.write(f"Epsilon Decay: {EPS_DECAY}\n")
-        f.write(f"Target Update: {TARGET_UPDATE}\n")
-        f.write(f"Memory Size: {MEMORY_SIZE}\n")
-        f.write(f"Episodes: {NUM_EPISODES}\n")
+    # Save the run configuration details to a text file within the log directory
+    config_log_path = os.path.join(log_dir, "config_log.txt")
+    try:
+        with open(config_log_path, "w") as f:
+            f.write(f"Run Name: {run_name}\n")
+            f.write(f"Environment: {ENV_NAME}\n")
+            f.write("--- Hyperparameters ---\n")
+            for key, value in hparams.items():
+                f.write(f"{key}: {value}\n")
+            f.write("\n--- Environment Configuration ---\n")
+            for key, value in config_dict.items():
+                f.write(f"{key}: {value}\n")
+        logging.info(f"Saved run configuration to {config_log_path}")
+    except IOError as e:
+        logging.error(f"Failed to write configuration log file: {e}")
 
-    # For tracking metrics
+    # --- Training Loop ---
+    logging.info(f"--- Starting Training for {NUM_EPISODES} Episodes ---")
     all_episode_rewards = []
-    all_losses = []
-    avg_window = 20  # For moving average
-    step = 0  # Initialize step counter
+    all_avg_losses = []  # Store average loss per episode
+    avg_reward_window = 50  # Window size for calculating moving average reward
+    total_steps = 0  # Global step counter across all episodes
 
-    training_started = True
+    training_started = True  # Set flag now that loop is starting
+
     for episode in range(1, NUM_EPISODES + 1):
-        if stop_training:  # Check if Ctrl+C was pressed
-            checkpoint_path = os.path.join(
-                MODEL_DIR, f"checkpoint_episode_{episode}.pth"
+        # --- Check for Interrupt Signal ---
+        if stop_training:
+            logging.warning(
+                f"Training interrupted at the beginning of episode {episode}. Saving checkpoint..."
             )
-            torch.save(policy_net.state_dict(), checkpoint_path)
-            logging.info(f"Checkpoint saved: {checkpoint_path}")
-            break
+            checkpoint_path = os.path.join(
+                MODEL_DIR, f"checkpoint_interrupt_ep{episode - 1}_{run_name}.pth"
+            )
+            try:
+                torch.save(policy_net.state_dict(), checkpoint_path)
+                logging.info(f"Checkpoint saved due to interrupt: {checkpoint_path}")
+            except Exception as e:
+                logging.error(f"Failed to save interrupt checkpoint: {e}")
+            break  # Exit the training loop
 
-        logging.info(f"--- Episode {episode} started ---")
+        # --- Episode Start ---
         state, _ = env.reset()
-        state = torch.tensor(preprocess_state(state), device=device)
-        total_reward = 0
+        state = torch.tensor(
+            preprocess_state(state), dtype=torch.float32, device=device
+        )
+        episode_reward = 0
+        episode_losses = []  # Track losses within this episode
         done = False
-        episode_losses = []
+        episode_steps = 0
+        logging.info(f"--- Episode {episode}/{NUM_EPISODES} Started ---")
 
+        # --- Inner Episode Loop (Steps) ---
         while not done:
-            action = select_action(state.cpu().numpy(), policy_net, epsilon)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            next_state = torch.tensor(preprocess_state(next_state), device=device)
+            # Select action using epsilon-greedy policy
+            action = select_action(state.cpu().numpy(), policy_net, epsilon, n_actions)
+
+            # Execute action in the environment
+            next_state_raw, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated  # Episode ends if terminated or truncated
+
+            # Preprocess the next state
+            next_state = torch.tensor(
+                preprocess_state(next_state_raw), dtype=torch.float32, device=device
+            )
+
+            # Store experience in replay buffer
+            # Convert tensors back to numpy for storage if needed by buffer implementation
             memory.push(
                 state.cpu().numpy(), action, reward, next_state.cpu().numpy(), done
             )
+
+            # Move to the next state
             state = next_state
-            total_reward += reward
+            episode_reward += reward
+            episode_steps += 1
+            total_steps += 1
 
-            logging.debug(
-                f"Step info: action={action}, reward={reward}, terminated={terminated}, truncated={truncated}"
-            )
-
-            # Capture loss during optimization
+            # --- Optimize Model ---
+            # Perform one step of optimization on the policy network
             loss = optimize_model(
-                policy_net, target_net, optimizer, memory, writer, step
+                policy_net, target_net, optimizer, memory, writer, total_steps, logging
             )
             if loss is not None:
                 episode_losses.append(loss)
+                # Log loss per step to TensorBoard
+                writer.add_scalar("Loss/Per_Step", loss, total_steps)
 
-            step += 1  # Increment step counter
+            # --- Target Network Update ---
+            # Update the target network every TARGET_UPDATE steps
+            if total_steps % TARGET_UPDATE == 0:
+                logging.info(f"Updating target network at step {total_steps}")
+                target_net.load_state_dict(policy_net.state_dict())
 
+            # Check for interrupt signal within the episode loop as well
+            if stop_training:
+                logging.warning(
+                    "Interrupt signal detected during episode step. Finishing episode..."
+                )
+                # Don't break here, let the episode finish naturally or by the outer loop check
+
+        # --- Episode End ---
+        # Decay epsilon after each episode
         epsilon = max(EPS_END, epsilon * EPS_DECAY)
-        writer.add_scalar("Epsilon", epsilon, episode)  # Log epsilon to TensorBoard
+        writer.add_scalar("Progress/Epsilon", epsilon, episode)
 
-        if episode % TARGET_UPDATE == 0:
-            target_net.load_state_dict(policy_net.state_dict())
-            logging.info("Target network updated")
+        # Log episode metrics
+        all_episode_rewards.append(episode_reward)
+        writer.add_scalar("Reward/Per_Episode", episode_reward, episode)
+        writer.add_scalar("Progress/Episode_Length", episode_steps, episode)
 
-        # Save metrics
-        all_episode_rewards.append(total_reward)
+        # Calculate and log average loss for the episode
+        avg_loss = 0.0  # Initialize avg_loss
         if episode_losses:
             avg_loss = sum(episode_losses) / len(episode_losses)
-            all_losses.append(avg_loss)
-            writer.add_scalar("Loss/Per_Episode", avg_loss, episode)
+            all_avg_losses.append(avg_loss)
+            writer.add_scalar("Loss/Average_Per_Episode", avg_loss, episode)
+            logging.debug(f"Episode {episode}: Average Loss = {avg_loss:.4f}")
+        else:
+            all_avg_losses.append(
+                avg_loss  # Append the initialized value (0.0)
+            )  # Append 0 if no optimization steps occurred (e.g., buffer not full)
 
-        writer.add_scalar("Reward/Per_Episode", total_reward, episode)
+        # Calculate and log moving average reward
+        # Prepare the average loss string for logging
+        avg_loss_str = f"{avg_loss:.4f}" if episode_losses else "N/A"
 
-        # Calculate moving average if possible
-        if len(all_episode_rewards) >= avg_window:
-            avg_reward = sum(all_episode_rewards[-avg_window:]) / avg_window
-            writer.add_scalar("Reward/Moving_Avg", avg_reward, episode)
-            print(
-                f"Episode {episode} | Reward: {total_reward:.2f} | Avg({avg_window}): {avg_reward:.2f} | Epsilon: {epsilon:.3f}"
+        if episode >= avg_reward_window:
+            avg_reward = np.mean(all_episode_rewards[-avg_reward_window:])
+            writer.add_scalar(
+                f"Reward/Moving_Avg_{avg_reward_window}", avg_reward, episode
+            )
+            # Use the pre-formatted avg_loss_str
+            logging.info(
+                f"Episode {episode}/{NUM_EPISODES} | Steps: {episode_steps} | Reward: {episode_reward:.2f} | Avg Reward ({avg_reward_window}): {avg_reward:.2f} | Avg Loss: {avg_loss_str} | Epsilon: {epsilon:.3f}"
             )
         else:
-            print(
-                f"Episode {episode} | Reward: {total_reward:.2f} | Epsilon: {epsilon:.3f}"
+            # Use the pre-formatted avg_loss_str
+            logging.info(
+                f"Episode {episode}/{NUM_EPISODES} | Steps: {episode_steps} | Reward: {episode_reward:.2f} | Avg Loss: {avg_loss_str} | Epsilon: {epsilon:.3f}"
             )
 
-    logging.info("Saving trained model")
-    model_filename = f"dqn_policy_net_{run_name}.pth"
-    torch.save(policy_net.state_dict(), os.path.join(MODEL_DIR, model_filename))
-    env.close()
+    # --- End of Training ---
+    training_started = False  # Reset flag
+    logging.info("--- Training Finished ---")
 
-    # Save final metrics
-    np.save(os.path.join(METRICS_DIR, "rewards.npy"), np.array(all_episode_rewards))
-    if all_losses:
-        np.save(os.path.join(METRICS_DIR, "losses.npy"), np.array(all_losses))
+    # --- Save Final Model ---
+    final_model_filename = f"dqn_policy_net_{run_name}_final.pth"
+    final_model_path = os.path.join(MODEL_DIR, final_model_filename)
+    try:
+        torch.save(policy_net.state_dict(), final_model_path)
+        logging.info(f"Saved final trained model to: {final_model_path}")
+    except Exception as e:
+        logging.error(f"Failed to save final model: {e}")
+
+    # Close the environment
+    env.close()
+    logging.info("Training environment closed.")
+
+    # --- Save Final Metrics ---
+    try:
+        rewards_path = os.path.join(METRICS_DIR, f"rewards_{run_name}.npy")
+        losses_path = os.path.join(METRICS_DIR, f"losses_{run_name}.npy")
+        np.save(rewards_path, np.array(all_episode_rewards))
+        np.save(losses_path, np.array(all_avg_losses))
+        logging.info(f"Saved final rewards to: {rewards_path}")
+        logging.info(f"Saved final losses to: {losses_path}")
+    except IOError as e:
+        logging.error(f"Failed to save metrics files: {e}")
 
     # Close TensorBoard writer
     writer.close()
+    logging.info("TensorBoard writer closed.")
 
-    # Record a video of the trained agent
-    logging.info("")
+    # --- Record Agent Performance ---
+    logging.info("--- Starting Agent Evaluation and Recording ---")
+    try:
+        # Create a separate environment instance for evaluation/recording
+        env_eval = gym.make(ENV_NAME, render_mode="rgb_array")
+        # NOTE: Ensure the evaluation environment also uses the potentially
+        # modified 'config_dict' (e.g., with increased 'duration')
+        # from 'configs/task_1_config.py' for consistency.
+        env_eval.unwrapped.configure(config_dict)
+        logging.info(f"Created evaluation environment: {ENV_NAME}")
 
-    # Recreate environment for video recording
+        record_agent(
+            policy_net=policy_net,
+            env=env_eval,
+            video_folder=VIDEO_DIR,  # Use the dedicated video directory
+            run_name=run_name,
+            num_eval_episodes=5,  # Record 5 episodes
+        )
+        env_eval.close()  # Close the evaluation environment
+        logging.info("Evaluation environment closed.")
+    except Exception as e:
+        logging.error(
+            f"An error occurred during agent recording: {e}", exc_info=True
+        )  # Log traceback
 
-    # Create environment using the config
-    env_eval = gym.make(ENV_NAME, render_mode="rgb_array")
-    env_eval.unwrapped.configure(config_dict)
-
-    record_agent(
-        policy_net,
-        env_eval,
-        video_folder=os.path.join(SAVE_DIR, "videos"),
-        run_name=run_name,
-    )
+    logging.info("--- Script Finished ---")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logging.critical(f"An unhandled exception occurred in main: {e}", exc_info=True)
+        sys.exit(1)
