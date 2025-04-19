@@ -28,19 +28,20 @@ sys.path.append("..")
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.distributions as distributions
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 from torch.utils.tensorboard import SummaryWriter
 
-from configs.task_2_config import ENVIRONEMNT, config_dict
+from configs.task_2_config import ENVIRONMENT, config_dict
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
 # Create environment using the config
-ENV_NAME = ENVIRONEMNT
+ENV_NAME = ENVIRONMENT
 env = gym.make(ENV_NAME, render_mode="rgb_array")
 env.unwrapped.configure(config_dict)
 
@@ -80,8 +81,15 @@ logging.debug(
     f"Calculated input_dim: {input_dim}, Flattened state shape: {state.shape}"
 )
 
-# Determine number of actions (for discrete action space)
-n_actions = env.action_space.n
+# Determine number of actions (for continuous action space)
+if isinstance(env.action_space, gym.spaces.Box):
+    action_dim = env.action_space.shape[0]
+    action_low = env.action_space.low
+    action_high = env.action_space.high
+else:
+    raise ValueError(
+        "This script currently only supports continuous action spaces (gym.spaces.Box)"
+    )
 
 # Check for GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -90,26 +98,29 @@ logging.info(f"Using device: {device}")
 
 class PolicyNetwork(nn.Module):
     """
-    Neural network for approximating the policy function.
+    Neural network for approximating the policy function for continuous actions.
+    Outputs mean and log standard deviation for a Gaussian distribution.
 
     Attributes:
         layer1 (nn.Linear): First fully connected layer.
         layer2 (nn.Linear): Second fully connected layer.
-        output_layer (nn.Linear): Output layer for action probabilities.
+        mean_layer (nn.Linear): Output layer for action means.
+        log_std_layer (nn.Linear): Output layer for log standard deviations.
     """
 
-    def __init__(self, input_dim, n_actions):
+    def __init__(self, input_dim, action_dim):
         """
         Initialize the PolicyNetwork.
-
+n_actions
         Args:
             input_dim (int): Dimension of the input state.
-            n_actions (int): Number of possible actions.
+            action_dim (int): Number of action dimensions.
         """
         super(PolicyNetwork, self).__init__()
         self.layer1 = nn.Linear(input_dim, 512)
         self.layer2 = nn.Linear(512, 128)
-        self.output_layer = nn.Linear(128, n_actions)
+        self.mean_layer = nn.Linear(128, action_dim)
+        self.log_std_layer = nn.Linear(128, action_dim)  # Output log_std
 
     def forward(self, x):
         """
@@ -119,31 +130,47 @@ class PolicyNetwork(nn.Module):
             x (torch.Tensor): Input tensor representing the state.
 
         Returns:
-            torch.Tensor: Output tensor representing action probabilities.
+            Tuple[torch.Tensor, torch.Tensor]: Mean and log standard deviation of the action distribution.
         """
         x = torch.relu(self.layer1(x))
         x = torch.relu(self.layer2(x))
-        return torch.softmax(self.output_layer(x), dim=-1)
+        mean = self.mean_layer(x)
+        # Clamp log_std for stability
+        log_std = torch.clamp(self.log_std_layer(x), min=-20, max=2)
+        return mean, log_std
 
 
 def select_action(state, policy_net):
     """
-    Select an action using the policy network.
+    Select an action using the policy network for continuous action spaces.
 
     Args:
         state (np.ndarray): Current state.
         policy_net (PolicyNetwork): Policy network.
 
     Returns:
-        int: Selected action.
+        np.ndarray: Selected action.
         torch.Tensor: Log probability of the selected action.
     """
     state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    logging.debug(f"State tensor shape: {state_tensor.shape}")  # Log state tensor shape
-    action_probs = policy_net(state_tensor)
-    action_dist = torch.distributions.Categorical(action_probs)
-    action = action_dist.sample()
-    return action.item(), action_dist.log_prob(action)
+    logging.debug(f"State tensor shape: {state_tensor.shape}")
+    mean, log_std = policy_net(state_tensor)
+    std = torch.exp(log_std)
+    action_dist = distributions.Normal(mean, std)
+    action = action_dist.sample()  # Sample action
+    log_prob = action_dist.log_prob(action).sum(
+        dim=-1
+    )  # Sum log probs across action dimensions
+
+    # Clip action to environment bounds
+    action_np = action.cpu().detach().numpy().flatten()
+    clipped_action = np.clip(action_np, action_low, action_high)
+
+    # Note: Clipping might affect gradient calculation if not handled carefully.
+    # For simplicity here, we use the log_prob of the unclipped action.
+    # More advanced methods might re-evaluate log_prob or use transformations (e.g., Tanh).
+
+    return clipped_action, log_prob
 
 
 def compute_returns(rewards, gamma):
@@ -240,9 +267,11 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).view(
                     1, -1
                 )
-                action_probs = policy_net(obs_tensor)
-                action_dist = torch.distributions.Categorical(action_probs)
-                action = action_dist.sample().item()
+                # Get mean action from the policy network for deterministic evaluation
+                mean, _ = policy_net(obs_tensor)
+                action = mean.cpu().detach().numpy().flatten()
+                # Clip action to environment bounds
+                action = np.clip(action, action_low, action_high)
 
             obs, reward, terminated, truncated, info = env.step(action)
             obs = preprocess_state(
@@ -251,7 +280,7 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
             total_reward += reward
             step_count += 1
             logging.debug(
-                f"Step {step_count}: Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}"
+                f"Step {step_count}: Action: {action}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}"
             )
 
             episode_over = terminated or truncated
@@ -320,11 +349,11 @@ def load_checkpoint(policy_net, model_dir):
     Prompt the user to select a checkpoint to load.
 
     Args:
-        policy_net (QNetwork): Policy network to load the checkpoint into.
+        policy_net (PolicyNetwork): Policy network to load the checkpoint into.
         model_dir (str): Directory containing model checkpoints.
 
     Returns:
-        QNetwork: Policy network with loaded weights.
+        PolicyNetwork: Policy network with loaded weights.
     """
     checkpoints = list_checkpoints(model_dir)
     if not checkpoints:
@@ -364,7 +393,7 @@ def main():
     """
     global training_started
 
-    policy_net = PolicyNetwork(input_dim, n_actions).to(device)
+    policy_net = PolicyNetwork(input_dim, action_dim).to(device)
     optimizer = optim.Adam(policy_net.parameters(), lr=LR)
 
     # Ask user for a custom run name
