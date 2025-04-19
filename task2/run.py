@@ -106,12 +106,13 @@ class PolicyNetwork(nn.Module):
         layer2 (nn.Linear): Second fully connected layer.
         mean_layer (nn.Linear): Output layer for action means.
         log_std_layer (nn.Linear): Output layer for log standard deviations.
+        value_layer (nn.Linear): Output layer for state value.
     """
 
     def __init__(self, input_dim, action_dim):
         """
         Initialize the PolicyNetwork.
-n_actions
+
         Args:
             input_dim (int): Dimension of the input state.
             action_dim (int): Number of action dimensions.
@@ -121,6 +122,7 @@ n_actions
         self.layer2 = nn.Linear(512, 128)
         self.mean_layer = nn.Linear(128, action_dim)
         self.log_std_layer = nn.Linear(128, action_dim)  # Output log_std
+        self.value_layer = nn.Linear(128, 1)  # Output value
 
     def forward(self, x):
         """
@@ -130,14 +132,15 @@ n_actions
             x (torch.Tensor): Input tensor representing the state.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Mean and log standard deviation of the action distribution.
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Mean, log standard deviation, and value.
         """
         x = torch.relu(self.layer1(x))
         x = torch.relu(self.layer2(x))
         mean = self.mean_layer(x)
         # Clamp log_std for stability
         log_std = torch.clamp(self.log_std_layer(x), min=-20, max=2)
-        return mean, log_std
+        value = self.value_layer(x)
+        return mean, log_std, value
 
 
 def select_action(state, policy_net):
@@ -151,10 +154,11 @@ def select_action(state, policy_net):
     Returns:
         np.ndarray: Selected action.
         torch.Tensor: Log probability of the selected action.
+        torch.Tensor: State value.
     """
     state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
     logging.debug(f"State tensor shape: {state_tensor.shape}")
-    mean, log_std = policy_net(state_tensor)
+    mean, log_std, value = policy_net(state_tensor)
     std = torch.exp(log_std)
     action_dist = distributions.Normal(mean, std)
     action = action_dist.sample()  # Sample action
@@ -166,50 +170,60 @@ def select_action(state, policy_net):
     action_np = action.cpu().detach().numpy().flatten()
     clipped_action = np.clip(action_np, action_low, action_high)
 
-    # Note: Clipping might affect gradient calculation if not handled carefully.
-    # For simplicity here, we use the log_prob of the unclipped action.
-    # More advanced methods might re-evaluate log_prob or use transformations (e.g., Tanh).
-
-    return clipped_action, log_prob
+    return clipped_action, log_prob, value
 
 
-def compute_returns(rewards, gamma):
+def ppo_update(
+    policy_net,
+    optimizer,
+    states,
+    actions,
+    old_log_probs,
+    returns,
+    advantages,
+    clip_epsilon=0.2,
+    ppo_epochs=4,
+):
     """
-    Compute discounted returns for a trajectory.
-
-    Args:
-        rewards (List[float]): List of rewards from the trajectory.
-        gamma (float): Discount factor.
-
-    Returns:
-        List[float]: Discounted returns.
-    """
-    returns = []
-    G = 0
-    for reward in reversed(rewards):
-        G = reward + gamma * G
-        returns.insert(0, G)
-    return returns
-
-
-def optimize_model(policy_net, optimizer, log_probs, returns):
-    """
-    Perform a single optimization step on the policy network.
+    Perform a PPO update on the policy network.
 
     Args:
         policy_net (PolicyNetwork): Policy network.
         optimizer (torch.optim.Optimizer): Optimizer for the policy network.
-        log_probs (List[torch.Tensor]): Log probabilities of actions taken.
+        states (List[np.ndarray]): List of states.
+        actions (List[np.ndarray]): List of actions.
+        old_log_probs (List[torch.Tensor]): Log probabilities of actions taken.
         returns (List[float]): Discounted returns.
+        advantages (List[float]): Advantages.
+        clip_epsilon (float): Clipping parameter for PPO.
+        ppo_epochs (int): Number of PPO epochs.
     """
-    returns = torch.tensor(returns, dtype=torch.float32, device=device)
-    returns = (returns - returns.mean()) / (returns.std() + 1e-8)  # Normalize returns
+    states = torch.tensor(states, dtype=torch.float32, device=device)
+    actions = torch.tensor(actions, dtype=torch.float32, device=device)
+    old_log_probs = torch.stack(old_log_probs).detach()
+    returns = torch.tensor(returns, dtype=torch.float32, device=device).unsqueeze(1)
+    advantages = torch.tensor(advantages, dtype=torch.float32, device=device).unsqueeze(
+        1
+    )
 
-    loss = -torch.sum(torch.stack(log_probs) * returns)  # Policy gradient loss
+    for _ in range(ppo_epochs):
+        mean, log_std, values = policy_net(states)
+        std = torch.exp(log_std)
+        dist = distributions.Normal(mean, std)
+        new_log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
+        ratio = torch.exp(new_log_probs - old_log_probs.unsqueeze(1))
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
 
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+        value_loss = nn.MSELoss()(values, returns)
+        entropy_bonus = dist.entropy().mean()
+
+        loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_bonus
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
 
 # Create directories for saving models and metrics
@@ -268,7 +282,7 @@ def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
                     1, -1
                 )
                 # Get mean action from the policy network for deterministic evaluation
-                mean, _ = policy_net(obs_tensor)
+                mean, _, _ = policy_net(obs_tensor)
                 action = mean.cpu().detach().numpy().flatten()
                 # Clip action to environment bounds
                 action = np.clip(action, action_low, action_high)
@@ -308,7 +322,7 @@ def get_run_name(custom_name=None):
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if custom_name:
         return f"{custom_name}_{timestamp}"
-    return f"PolicyGradient_lr{LR}_gamma{GAMMA}_episodes{NUM_EPISODES}_{timestamp}"
+    return f"PPO_lr{LR}_gamma{GAMMA}_episodes{NUM_EPISODES}_{timestamp}"
 
 
 # Global variable to track if training should stop
@@ -435,26 +449,41 @@ def main():
         logging.info(f"--- Episode {episode} started ---")
         state, _ = env.reset()
         state = preprocess_state(state)
+
+        # Initialize rollout storage
+        states = []
+        actions = []
+        rewards = []
+        old_log_probs = []
+        values = []
+
         total_reward = 0
         done = False
 
-        log_probs = []
-        rewards = []
-
         while not done:
-            action, log_prob = select_action(state, policy_net)
+            states.append(state)
+            action, log_prob, value = select_action(state, policy_net)
+            actions.append(action)  # <-- Added: store action
+            old_log_probs.append(log_prob)
+            values.append(value.item())
             next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            next_state = preprocess_state(next_state)
-
-            log_probs.append(log_prob)
             rewards.append(reward)
-            state = next_state
+            state = preprocess_state(next_state)
             total_reward += reward
+            done = terminated or truncated
 
-        # Compute returns and optimize the policy network
-        returns = compute_returns(rewards, GAMMA)
-        optimize_model(policy_net, optimizer, log_probs, returns)
+        # Compute returns
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + GAMMA * G
+            returns.insert(0, G)
+        # Compute advantages as (return - value)
+        advantages = [ret - val for ret, val in zip(returns, values)]
+
+        ppo_update(
+            policy_net, optimizer, states, actions, old_log_probs, returns, advantages
+        )
 
         all_episode_rewards.append(total_reward)
         writer.add_scalar("Reward/Per_Episode", total_reward, episode)
