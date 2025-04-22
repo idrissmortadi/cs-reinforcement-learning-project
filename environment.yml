@@ -21,3 +21,5 @@ dependencies:
       - highway-env
       - pytest
       - torch
+      - tensorboard
+      - gymnasium[other]
