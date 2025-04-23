@@ -18,9 +18,9 @@ config_dict = {
     "simulation_frequency": 15,
     "policy_frequency": 5,
     "duration": 300,
-    "collision_reward": -5,
+    "collision_reward": -3.5,
     "lane_centering_cost": 4,
-    "action_reward": -0.3,
+    "action_reward": -0.7,
     "controlled_vehicles": 1,
     "other_vehicles": 3,
     "screen_width": 600,
@@ -29,6 +29,8 @@ config_dict = {
     "scaling": 7,
     "show_trajectories": False,
     "render_agent": True,
+    "offroad_terminal": True,
+    "offroad_reward": -5,
     "offscreen_rendering": False,
 }
 
