@@ -1,38 +1,18 @@
-"""
-Policy Gradient (REINFORCE) implementation for a custom Gymnasium environment.
-
-This script trains a Policy Gradient agent to interact with an environment
-and learn an optimal policy. The environment and its configuration are defined
-in the `configs.task_1_config` module.
-
-Key Features:
-- Preprocessing of state observations.
-- Policy network for action selection.
-- REINFORCE algorithm for training.
-- Periodic saving of rewards and the trained model.
-
-Usage:
-    python task1.py
-"""
-
-import datetime
+import argparse
 import logging
 import os
-import signal  # For handling Ctrl+C
 import sys
-
-# For accessing the config module;
-sys.path.append("..")
-
+from datetime import datetime
 
 import gymnasium as gym
 import numpy as np
+import ppo
 import torch
-import torch.distributions as distributions
-import torch.nn as nn
-import torch.optim as optim
-from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
+
+# For accessing the config module;
+sys.path.append(os.path.abspath(os.path.join(__file__, os.pardir, os.pardir)))
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from configs.task_2_config import ENVIRONMENT, config_dict
 
@@ -40,488 +20,364 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# Create environment using the config
-ENV_NAME = ENVIRONMENT
-env = gym.make(ENV_NAME, render_mode="rgb_array")
-env.unwrapped.configure(config_dict)
 
-
-# If observations are dicts (for OccupancyGrid), flatten them
-def preprocess_state(state):
-    """
-    Preprocess the state observation by flattening it if it is a dictionary.
-
-    Args:
-        state (Union[dict, np.ndarray]): The raw state observation.
-
-    Returns:
-        np.ndarray: The preprocessed state as a flattened NumPy array.
-    """
-    if isinstance(state, dict):
-        # Flatten state with sorted keys to ensure consistent ordering
-        state = np.concatenate(
-            [np.array(state[k]).flatten() for k in sorted(state.keys())]
-        )
-    return np.array(state, dtype=np.float32).flatten()  # Ensure the state is flattened
-
-
-# DQN Hyperparameters
-BATCH_SIZE = 64  # Batch size for training
-GAMMA = 0.99  # Discount factor for future rewards
-LR = 1e-4  # Learning rate for the optimizer
-TARGET_UPDATE = 1_000  # Number of episodes between updates of the target network
-MEMORY_SIZE = 10_000  # Maximum capacity of the replay buffer
-NUM_EPISODES = 5_000  # Total number of episodes for training
-
-# Determine input dimension from a sample observation
-state, _ = env.reset()
-state = preprocess_state(state)
-input_dim = state.size  # Use the size of the flattened state
-logging.debug(
-    f"Calculated input_dim: {input_dim}, Flattened state shape: {state.shape}"
-)
-
-# Determine number of actions (for continuous action space)
-if isinstance(env.action_space, gym.spaces.Box):
-    action_dim = env.action_space.shape[0]
-    action_low = env.action_space.low
-    action_high = env.action_space.high
-else:
-    raise ValueError(
-        "This script currently only supports continuous action spaces (gym.spaces.Box)"
-    )
-
-# Check for GPU availability
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logging.info(f"Using device: {device}")
-
-
-class PolicyNetwork(nn.Module):
-    """
-    Neural network for approximating the policy function for continuous actions.
-    Outputs mean and log standard deviation for a Gaussian distribution.
-
-    Attributes:
-        layer1 (nn.Linear): First fully connected layer.
-        layer2 (nn.Linear): Second fully connected layer.
-        mean_layer (nn.Linear): Output layer for action means.
-        log_std_layer (nn.Linear): Output layer for log standard deviations.
-        value_layer (nn.Linear): Output layer for state value.
-    """
-
-    def __init__(self, input_dim, action_dim):
-        """
-        Initialize the PolicyNetwork.
-
-        Args:
-            input_dim (int): Dimension of the input state.
-            action_dim (int): Number of action dimensions.
-        """
-        super(PolicyNetwork, self).__init__()
-        self.layer1 = nn.Linear(input_dim, 512)
-        self.layer2 = nn.Linear(512, 128)
-        self.mean_layer = nn.Linear(128, action_dim)
-        self.log_std_layer = nn.Linear(128, action_dim)  # Output log_std
-        self.value_layer = nn.Linear(128, 1)  # Output value
-
-    def forward(self, x):
-        """
-        Perform a forward pass through the network.
-
-        Args:
-            x (torch.Tensor): Input tensor representing the state.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Mean, log standard deviation, and value.
-        """
-        x = torch.relu(self.layer1(x))
-        x = torch.relu(self.layer2(x))
-        mean = self.mean_layer(x)
-        # Clamp log_std for stability
-        log_std = torch.clamp(self.log_std_layer(x), min=-20, max=2)
-        value = self.value_layer(x)
-        return mean, log_std, value
-
-
-def select_action(state, policy_net):
-    """
-    Select an action using the policy network for continuous action spaces.
-
-    Args:
-        state (np.ndarray): Current state.
-        policy_net (PolicyNetwork): Policy network.
-
-    Returns:
-        np.ndarray: Selected action.
-        torch.Tensor: Log probability of the selected action.
-        torch.Tensor: State value.
-    """
-    state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    logging.debug(f"State tensor shape: {state_tensor.shape}")
-    mean, log_std, value = policy_net(state_tensor)
-    std = torch.exp(log_std)
-    action_dist = distributions.Normal(mean, std)
-    action = action_dist.sample()  # Sample action
-    log_prob = action_dist.log_prob(action).sum(
-        dim=-1
-    )  # Sum log probs across action dimensions
-
-    # Clip action to environment bounds
-    action_np = action.cpu().detach().numpy().flatten()
-    clipped_action = np.clip(action_np, action_low, action_high)
-
-    return clipped_action, log_prob, value
-
-
-def ppo_update(
-    policy_net,
-    optimizer,
-    states,
-    actions,
-    old_log_probs,
-    returns,
-    advantages,
-    clip_epsilon=0.2,
-    ppo_epochs=4,
+def train(
+    env: gym.Env,
+    agent: ppo.PPOAgent,
+    N_episodes: int,
+    writer: SummaryWriter,
+    run_name: str,
+    reward_threshold: int = 400,
+    record_every_ep: int = 8,
+    checkpoint_every_ep: int = 50,
+    eval_every_ep: int = 20,
+    patience: int = 512,
 ):
+    total_env_steps = 0
+    all_episode_rewards = []
+    episode_pbar = tqdm(range(N_episodes))
+
+    # Early stopping variables
+    best_avg_reward = float("-inf")
+    episodes_without_improvement = 0
+
+    os.makedirs(f"results/models/{run_name}", exist_ok=True)
+
+    for ep in episode_pbar:
+        state, _ = env.reset()
+        state = state.flatten()
+        ep_reward = 0
+        ep_steps = 0
+        ep_speed = 0
+        ep_crash = False
+        ep_action_sum = np.zeros(env.action_space.shape)
+        ep_coll = ep_lane = ep_high = ep_onroad = 0
+
+        done = False
+        episode_pbar.set_description("Collecting observations...")
+        while not done:
+            action, value, logp = agent.select_action(state)
+            next_state, reward, terminated, truncated, info = env.step(action)
+            next_state = next_state.flatten()
+            done = terminated or truncated
+
+            if info["rewards"].get("on_road_reward", 1) == 0:
+                reward += -1.0
+
+            agent.store(state, action, reward, value, logp)
+
+            ep_reward += reward
+            ep_steps += 1
+            ep_speed += info.get("speed", 0)
+            if info.get("crashed", False):
+                ep_crash = True
+            ep_action_sum += action
+            rinfo = info.get("rewards", {})
+            ep_coll += rinfo.get("collision_reward", 0)
+            ep_lane += rinfo.get("right_lane_reward", 0)
+            ep_high += rinfo.get("high_speed_reward", 0)
+            ep_onroad += rinfo.get("on_road_reward", 0)
+
+            state = next_state
+            total_env_steps += 1
+
+            if done:
+                last_val = 0
+                agent.finish_path(last_val)
+
+            if total_env_steps % agent.buf.max_size == 0:
+                agent.finish_path(last_val if not done else 0)
+                episode_pbar.set_description("Updating agent...")
+                agent.update()
+
+        all_episode_rewards.append(ep_reward)
+        moving_avg = (
+            np.mean(all_episode_rewards[-20:])
+            if len(all_episode_rewards) >= 20
+            else np.mean(all_episode_rewards)
+        )
+        episode_pbar.set_postfix(moving_avg=moving_avg)
+
+        writer.add_scalar("Episode/TotalReward", ep_reward, ep + 1)
+        writer.add_scalar("Episode/Length", ep_steps, ep + 1)
+        if ep_steps:
+            writer.add_scalar("Episode/AvgSpeed", ep_speed / ep_steps, ep + 1)
+            writer.add_scalar("Episode/Crashed", int(ep_crash), ep + 1)
+            avg_act = ep_action_sum / ep_steps
+            writer.add_scalar("Episode/AvgAction_0", avg_act[0], ep + 1)
+            if avg_act.size > 1:
+                writer.add_scalar("Episode/AvgAction_1", avg_act[1], ep + 1)
+            writer.add_scalar("Episode/AvgReward_Collision", ep_coll / ep_steps, ep + 1)
+            writer.add_scalar("Episode/AvgReward_RightLane", ep_lane / ep_steps, ep + 1)
+            writer.add_scalar("Episode/AvgReward_HighSpeed", ep_high / ep_steps, ep + 1)
+            writer.add_scalar("Episode/AvgReward_OnRoad", ep_onroad / ep_steps, ep + 1)
+
+        if len(all_episode_rewards) >= 20:
+            writer.add_scalar("Reward/Moving_Avg", moving_avg, ep + 1)
+
+            # Check for improvement for early stopping
+            if moving_avg > best_avg_reward:
+                best_avg_reward = moving_avg
+                episodes_without_improvement = 0
+                # Save best model
+                agent.save(f"results/models/{run_name}/best_model.pth")
+                logging.info(
+                    f"New best model saved with average reward: {best_avg_reward:.2f}"
+                )
+            else:
+                episodes_without_improvement += 1
+                if episodes_without_improvement >= patience:
+                    logging.info(
+                        f"Early stopping after {patience} episodes without improvement"
+                    )
+                    break
+
+        # Periodic checkpoints
+        if (ep + 1) % checkpoint_every_ep == 0:
+            agent.save(f"results/models/{run_name}/checkpoint_ep_{ep + 1}.pth")
+            logging.info(f"Checkpoint saved at episode {ep + 1}")
+
+        # Periodic recording
+        if ep % record_every_ep == 0:
+            record_agent(agent, env, run_name)
+
+        # Periodic evaluation
+        if ep % eval_every_ep == 0:
+            eval_reward, eval_std = evaluate_agent(agent, env, num_episodes=5)
+            writer.add_scalar("Evaluation/AvgReward", eval_reward, ep + 1)
+            logging.info(
+                f"Evaluation at episode {ep + 1}: Average reward = {eval_reward:.2f} ({eval_std:.2f})"
+            )
+
+        if moving_avg >= reward_threshold:
+            logging.info(
+                f"Reward threshold {reward_threshold} reached at episode {ep + 1}"
+            )
+            break
+
+
+def evaluate_agent(agent: ppo.PPOAgent, env: gym.Env, num_episodes: int = 5) -> float:
     """
-    Perform a PPO update on the policy network.
+    Evaluate the agent without recording videos
 
     Args:
-        policy_net (PolicyNetwork): Policy network.
-        optimizer (torch.optim.Optimizer): Optimizer for the policy network.
-        states (List[np.ndarray]): List of states.
-        actions (List[np.ndarray]): List of actions.
-        old_log_probs (List[torch.Tensor]): Log probabilities of actions taken.
-        returns (List[float]): Discounted returns.
-        advantages (List[float]): Advantages.
-        clip_epsilon (float): Clipping parameter for PPO.
-        ppo_epochs (int): Number of PPO epochs.
+        agent: The PPO agent
+        env: The environment
+        num_episodes: Number of episodes to evaluate
+
+    Returns:
+        Average reward across episodes
     """
-    states = torch.tensor(states, dtype=torch.float32, device=device)
-    actions = torch.tensor(actions, dtype=torch.float32, device=device)
-    old_log_probs = torch.stack(old_log_probs).detach()
-    returns = torch.tensor(returns, dtype=torch.float32, device=device).unsqueeze(1)
-    advantages = torch.tensor(advantages, dtype=torch.float32, device=device).unsqueeze(
-        1
-    )
+    rewards = []
 
-    for _ in range(ppo_epochs):
-        mean, log_std, values = policy_net(states)
-        std = torch.exp(log_std)
-        dist = distributions.Normal(mean, std)
-        new_log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
-        ratio = torch.exp(new_log_probs - old_log_probs.unsqueeze(1))
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
+    for _ in range(num_episodes):
+        state, _ = env.reset()
+        state = state.flatten()
+        episode_reward = 0
+        done = False
 
-        value_loss = nn.MSELoss()(values, returns)
-        entropy_bonus = dist.entropy().mean()
+        while not done:
+            with torch.no_grad():
+                action, _, _ = agent.select_action(state)
+            state, reward, terminated, truncated, info = env.step(action)
+            state = state.flatten()
 
-        loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_bonus
+            if info["rewards"].get("on_road_reward", 1) == 0:
+                reward += -1.0
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            episode_reward += reward
+            done = terminated or truncated
+
+        rewards.append(episode_reward)
+
+    return np.mean(rewards), np.std(rewards)
 
 
-# Create directories for saving models and metrics
-SAVE_DIR = "results"
-MODEL_DIR = os.path.join(SAVE_DIR, "models")
-METRICS_DIR = os.path.join(SAVE_DIR, "metrics")
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(METRICS_DIR, exist_ok=True)
-
-
-def record_agent(policy_net, env, video_folder, run_name, num_eval_episodes=4):
+def record_agent(agent: ppo.PPOAgent, env, run_name, num_eval_episodes=4):
     """
     Record a video of the trained agent's performance.
 
     Args:
-        policy_net (PolicyNetwork): Trained policy network.
+        agent (ppo.PPO): Trained PPO agent.
         env (gym.Env): Environment to evaluate the agent.
         video_folder (str): Directory to save the video.
         run_name (str): Name of the current run for organizing videos.
         num_eval_episodes (int): Number of episodes to record.
     """
     # Create a subdirectory for the current run's videos
+    video_folder = "results/videos/"
     run_video_folder = os.path.join(video_folder, run_name)
     os.makedirs(run_video_folder, exist_ok=True)
     logging.info(f"Recording videos to folder: {run_video_folder}")
-    env = RecordVideo(
+
+    # Wrap the environment with video recording
+    env = gym.wrappers.RecordVideo(
         env,
         video_folder=run_video_folder,
         name_prefix="eval",
-        fps=10,
-        episode_trigger=lambda episode_id: True,  # Record all episodes
+        episode_trigger=lambda _: True,  # Record all episodes
+        fps=16,
     )
-    env = RecordEpisodeStatistics(env, buffer_length=num_eval_episodes)
 
     for episode_num in range(num_eval_episodes):
         logging.info(
             f"Starting evaluation episode {episode_num + 1}/{num_eval_episodes}"
         )
-        obs, info = env.reset()
-        obs = preprocess_state(obs).flatten()  # Ensure the observation is flattened
-        logging.debug(f"Initial observation: {obs}")
-
-        # Dynamically verify input dimension
-        if obs.size != policy_net.layer1.in_features:
-            raise ValueError(
-                f"Mismatch between observation size ({obs.size}) and policy network input size ({policy_net.layer1.in_features})."
-            )
-
-        episode_over = False
-        total_reward = 0
-        step_count = 0
-
-        while not episode_over:
-            with torch.no_grad():
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).view(
-                    1, -1
-                )
-                # Get mean action from the policy network for deterministic evaluation
-                mean, _, _ = policy_net(obs_tensor)
-                action = mean.cpu().detach().numpy().flatten()
-                # Clip action to environment bounds
-                action = np.clip(action, action_low, action_high)
-
-            obs, reward, terminated, truncated, info = env.step(action)
-            obs = preprocess_state(
-                obs
-            ).flatten()  # Ensure the next observation is flattened
-            total_reward += reward
-            step_count += 1
-            logging.debug(
-                f"Step {step_count}: Action: {action}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}"
-            )
-
-            episode_over = terminated or truncated
-
-        logging.info(
-            f"Episode {episode_num + 1} completed. Total reward: {total_reward}, Steps: {step_count}"
-        )
-
-    env.close()
-    logging.info(f"Video recording completed. Videos saved to: {run_video_folder}")
-    print(f"Episode total rewards: {env.return_queue}")
-    print(f"Episode lengths: {env.length_queue}")
-
-
-def get_run_name(custom_name=None):
-    """
-    Generate a descriptive name for the current experiment run.
-
-    Args:
-        custom_name (str, optional): Custom name provided by the user. Defaults to None.
-
-    Returns:
-        str: Generated run name.
-    """
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    if custom_name:
-        return f"{custom_name}_{timestamp}"
-    return f"PPO_lr{LR}_gamma{GAMMA}_episodes{NUM_EPISODES}_{timestamp}"
-
-
-# Global variable to track if training should stop
-stop_training = False
-training_started = False
-
-
-def signal_handler(sig, frame):
-    """
-    Handle Ctrl+C signal to save a model checkpoint and stop training.
-    """
-    global stop_training
-    global training_started
-    # Set stop_training to True if training has started
-    stop_training = True and training_started
-    if stop_training:
-        logging.info("Training has been interrupted. Saving model checkpoint...")
-
-
-signal.signal(signal.SIGINT, signal_handler)
-
-
-def list_checkpoints(model_dir):
-    """
-    List all available checkpoints in the model directory.
-
-    Args:
-        model_dir (str): Directory containing model checkpoints.
-
-    Returns:
-        List[str]: List of checkpoint filenames.
-    """
-    return [f for f in os.listdir(model_dir) if f.endswith(".pth")]
-
-
-def load_checkpoint(policy_net, model_dir):
-    """
-    Prompt the user to select a checkpoint to load.
-
-    Args:
-        policy_net (PolicyNetwork): Policy network to load the checkpoint into.
-        model_dir (str): Directory containing model checkpoints.
-
-    Returns:
-        PolicyNetwork: Policy network with loaded weights.
-    """
-    checkpoints = list_checkpoints(model_dir)
-    if not checkpoints:
-        logging.info("No checkpoints found. Starting from scratch.")
-        return policy_net
-
-    print("Available checkpoints:")
-    for i, checkpoint in enumerate(checkpoints, 1):
-        print(f"{i}. {checkpoint}")
-
-    while True:
-        try:
-            choice = int(
-                input("Select a checkpoint to load (enter number or 0 to skip): ")
-            )
-            if 1 <= choice <= len(checkpoints):
-                checkpoint_path = os.path.join(model_dir, checkpoints[choice - 1])
-                policy_net.load_state_dict(torch.load(checkpoint_path))
-                logging.info(f"Loaded checkpoint: {checkpoints[choice - 1]}")
-                return policy_net
-            elif choice == 0:
-                print("Starting from scratch without loading a checkpoint.")
-                return policy_net
-            else:
-                print("Invalid choice. Please select a valid number.")
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-
-
-def main():
-    """
-    Main training loop for the policy gradient agent.
-
-    - Initializes the environment, policy network, and optimizer.
-    - Runs episodes to train the agent.
-    - Periodically saves metrics and the trained model.
-    """
-    global training_started
-
-    policy_net = PolicyNetwork(input_dim, action_dim).to(device)
-    optimizer = optim.Adam(policy_net.parameters(), lr=LR)
-
-    # Ask user for a custom run name
-    custom_run_name = input(
-        "Enter a custom run name (or press Enter to use default): "
-    ).strip()
-    run_name = get_run_name(custom_run_name if custom_run_name else None)
-
-    # Initialize TensorBoard writer
-    log_dir = os.path.join(SAVE_DIR, "tensorboard", run_name)
-    writer = SummaryWriter(log_dir=log_dir)
-    print(f"TensorBoard run name: {run_name}")
-
-    # Log hyperparameters to TensorBoard
-    writer.add_hparams(
-        {
-            "learning_rate": LR,
-            "batch_size": BATCH_SIZE,
-            "gamma": GAMMA,
-            "num_episodes": NUM_EPISODES,
-        },
-        {},
-    )
-
-    # For tracking metrics
-    all_episode_rewards = []
-    avg_window = 20  # For moving average
-
-    training_started = True
-    for episode in range(1, NUM_EPISODES + 1):
-        if stop_training:  # Check if Ctrl+C was pressed
-            checkpoint_path = os.path.join(
-                MODEL_DIR, f"checkpoint_episode_{episode}.pth"
-            )
-            torch.save(policy_net.state_dict(), checkpoint_path)
-            logging.info(f"Checkpoint saved: {checkpoint_path}")
-            break
-
-        logging.info(f"--- Episode {episode} started ---")
         state, _ = env.reset()
-        state = preprocess_state(state)
-
-        # Initialize rollout storage
-        states = []
-        actions = []
-        rewards = []
-        old_log_probs = []
-        values = []
-
+        state = state.flatten()  # Ensure the observation is flattened
         total_reward = 0
         done = False
 
         while not done:
-            states.append(state)
-            action, log_prob, value = select_action(state, policy_net)
-            actions.append(action)  # <-- Added: store action
-            old_log_probs.append(log_prob)
-            values.append(value.item())
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            rewards.append(reward)
-            state = preprocess_state(next_state)
+            with torch.no_grad():
+                action, _, _ = agent.select_action(state)
+            state, reward, terminated, truncated, info = env.step(action)
+
+            if info["rewards"].get("on_road_reward", 1) == 0:
+                reward += -1.0
+
+            state = state.flatten()
             total_reward += reward
             done = terminated or truncated
 
-        # Compute returns
-        returns = []
-        G = 0
-        for r in reversed(rewards):
-            G = r + GAMMA * G
-            returns.insert(0, G)
-        # Compute advantages as (return - value)
-        advantages = [ret - val for ret, val in zip(returns, values)]
-
-        ppo_update(
-            policy_net, optimizer, states, actions, old_log_probs, returns, advantages
+        logging.info(
+            f"Episode {episode_num + 1} completed. Total reward: {total_reward}"
         )
 
-        all_episode_rewards.append(total_reward)
-        writer.add_scalar("Reward/Per_Episode", total_reward, episode)
-
-        # Calculate moving average if possible
-        if len(all_episode_rewards) >= avg_window:
-            avg_reward = sum(all_episode_rewards[-avg_window:]) / avg_window
-            writer.add_scalar("Reward/Moving_Avg", avg_reward, episode)
-            print(
-                f"Episode {episode} | Reward: {total_reward:.2f} | Avg({avg_window}): {avg_reward:.2f}"
-            )
-        else:
-            print(f"Episode {episode} | Reward: {total_reward:.2f}")
-
-    logging.info("Saving trained model")
-    model_filename = f"policy_net_{run_name}.pth"
-    torch.save(policy_net.state_dict(), os.path.join(MODEL_DIR, model_filename))
     env.close()
+    logging.info(f"Video recording completed. Videos saved to: {run_video_folder}")
 
-    # Save final metrics
-    np.save(os.path.join(METRICS_DIR, "rewards.npy"), np.array(all_episode_rewards))
 
-    # Close TensorBoard writer
-    writer.close()
-
-    # Record a video of the trained agent
-    logging.info("")
-
-    # Recreate environment for video recording
-    env_eval = gym.make(ENV_NAME, render_mode="rgb_array")
-    env_eval.unwrapped.configure(config_dict)
-
-    record_agent(
-        policy_net,
-        env_eval,
-        video_folder=os.path.join(SAVE_DIR, "videos"),
-        run_name=run_name,
+def parse_args():
+    parser = argparse.ArgumentParser(description="PPO agent training for RL tasks")
+    parser.add_argument(
+        "--run_name", type=str, default="", help="Name for this training run"
     )
+    parser.add_argument(
+        "--episodes", type=int, default=1280, help="Number of training episodes"
+    )
+    parser.add_argument(
+        "--reward_threshold",
+        type=int,
+        default=400,
+        help="Reward threshold for early stopping",
+    )
+    parser.add_argument(
+        "--record_every", type=int, default=32, help="Record video every N episodes"
+    )
+    parser.add_argument(
+        "--checkpoint_every",
+        type=int,
+        default=50,
+        help="Save checkpoint every N episodes",
+    )
+    parser.add_argument(
+        "--eval_every", type=int, default=20, help="Evaluate agent every N episodes"
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=128,
+        help="Episodes without improvement before early stopping",
+    )
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
+    parser.add_argument(
+        "--actor_lr", type=float, default=1e-3, help="Actor learning rate"
+    )
+    parser.add_argument(
+        "--critic_lr", type=float, default=1e-4, help="Critic learning rate"
+    )
+    parser.add_argument(
+        "--lambda_", type=float, default=0.95, help="GAE lambda parameter"
+    )
+    parser.add_argument(
+        "--load_model", type=str, default="", help="Path to load a pre-trained model"
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # === Get run name ===
+    run_name = args.run_name
+    if run_name == "":
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_name = f"PPO_{timestamp}"
+
+    print("Run name: ", run_name)
+
+    # Create necessary directories
+    os.makedirs("results/tensorboard", exist_ok=True)
+    os.makedirs("results/models", exist_ok=True)
+    os.makedirs("results/videos", exist_ok=True)
+
+    # Tensorboard writer:
+    writer = SummaryWriter(log_dir=f"results/tensorboard/{run_name}")
+
+    env = gym.make(ENVIRONMENT, render_mode="rgb_array")
+    env.unwrapped.configure(config_dict)
+    _ = env.reset()
+
+    action_space = env.action_space
+    observation_space = env.observation_space
+
+    gamma = args.gamma
+    actor_learning_rate = args.actor_lr
+    critic_learning_rate = args.critic_lr
+    lambda_ = args.lambda_
+
+    action_space = env.action_space
+    observation_space = env.observation_space
+    print("Observation space shape: ", observation_space.shape)
+
+    agent = ppo.PPOAgent(
+        np.prod(observation_space.shape),
+        action_space.shape[0],
+        gamma=gamma,
+        lam=lambda_,
+        pi_lr=actor_learning_rate,
+        vf_lr=critic_learning_rate,
+        clip_ratio=0.05,
+    )
+
+    # Load pre-trained model if specified
+    if args.load_model:
+        if os.path.exists(args.load_model):
+            agent.load(args.load_model)
+            logging.info(f"Loaded pre-trained model from {args.load_model}")
+        else:
+            logging.warning(
+                f"Model file {args.load_model} not found. Starting with a new model."
+            )
+
+    train(
+        env,
+        agent,
+        writer=writer,
+        run_name=run_name,
+        N_episodes=args.episodes,
+        reward_threshold=args.reward_threshold,
+        record_every_ep=args.record_every,
+        checkpoint_every_ep=args.checkpoint_every,
+        eval_every_ep=args.eval_every,
+        patience=args.patience,
+    )
+
+    # Save the final model
+    agent.save(f"results/models/{run_name}/final_model.pth")
+    logging.info(f"Final model saved to results/models/{run_name}/final_model.pth")
+
+    # Record videos of the trained agent
+    record_agent(agent, env, run_name, num_eval_episodes=3)
+
+    # Final evaluation
+    final_reward, final_std = evaluate_agent(agent, env, num_episodes=10)
+    logging.info(f"Final evaluation: Average reward = {final_reward:.2f}")
+    writer.add_scalar("Evaluation/FinalAvgReward", final_reward)
+
+    writer.close()
 
 
 if __name__ == "__main__":
