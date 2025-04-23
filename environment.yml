@@ -6,10 +6,12 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - gymnasium[toy-text]
+      - gymnasium
       - stable-baselines3
+      - stable-baselines3[extra]
       - opencv-python
       - matplotlib
+      - tensorboard
       - pandas
       - seaborn
       - tqdm
