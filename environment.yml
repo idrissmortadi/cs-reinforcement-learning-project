@@ -8,6 +8,7 @@ dependencies:
   - pip:
       - gymnasium
       - stable-baselines3
+      - stable-baselines3[extra]
       - opencv-python
       - matplotlib
       - tensorboard
@@ -20,3 +21,5 @@ dependencies:
       - highway-env
       - pytest
       - torch
+      - tensorboard
+      - gymnasium[other]

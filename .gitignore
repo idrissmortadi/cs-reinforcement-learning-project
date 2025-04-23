@@ -1,3 +1,23 @@
+# model files
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tar
+*.zip
+*.npy
+
+# Tensorboard
+#  TensorBoard log files
+tensorboard/
+
+# Videos
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
