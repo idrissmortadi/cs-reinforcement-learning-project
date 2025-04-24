@@ -244,14 +244,23 @@ def main():
         episode_steps = 0
         logging.info(f"--- Episode {episode}/{NUM_EPISODES} Started ---")
 
+        ep_speed = 0
+        ep_crash = False
+        ep_action_sum = np.zeros(n_actions)
+        ep_coll = ep_lane = ep_high = ep_onroad = 0
+
         # --- Inner Episode Loop (Steps) ---
         while not done:
             # Select action using epsilon-greedy policy
             action = select_action(state.cpu().numpy(), policy_net, epsilon, n_actions)
 
             # Execute action in the environment
-            next_state_raw, reward, terminated, truncated, _ = env.step(action)
+            next_state_raw, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated  # Episode ends if terminated or truncated
+
+            # Update crash detection using the `info` dictionary
+            if info.get("crashed", False):
+                ep_crash = True
 
             # Preprocess the next state
             next_state = torch.tensor(
@@ -269,6 +278,18 @@ def main():
             episode_reward += reward
             episode_steps += 1
             total_steps += 1
+
+            ep_speed += env.unwrapped.speed if hasattr(env.unwrapped, "speed") else 0
+            ep_action_sum[action] += 1
+            rinfo = (
+                env.unwrapped.reward_info
+                if hasattr(env.unwrapped, "reward_info")
+                else {}
+            )
+            ep_coll += rinfo.get("collision_reward", 0)
+            ep_lane += rinfo.get("right_lane_reward", 0)
+            ep_high += rinfo.get("high_speed_reward", 0)
+            ep_onroad += rinfo.get("on_road_reward", 0)
 
             # --- Optimize Model ---
             # Perform one step of optimization on the policy network
@@ -332,6 +353,26 @@ def main():
             # Use the pre-formatted avg_loss_str
             logging.info(
                 f"Episode {episode}/{NUM_EPISODES} | Steps: {episode_steps} | Reward: {episode_reward:.2f} | Avg Loss: {avg_loss_str} | Epsilon: {epsilon:.3f}"
+            )
+
+        # Log additional metrics to TensorBoard
+        if episode_steps:
+            writer.add_scalar("Episode/AvgSpeed", ep_speed / episode_steps, episode)
+            writer.add_scalar("Episode/Crashed", int(ep_crash), episode)
+            avg_act = ep_action_sum / episode_steps
+            for i, avg in enumerate(avg_act):
+                writer.add_scalar(f"Episode/AvgAction_{i}", avg, episode)
+            writer.add_scalar(
+                "Episode/AvgReward_Collision", ep_coll / episode_steps, episode
+            )
+            writer.add_scalar(
+                "Episode/AvgReward_RightLane", ep_lane / episode_steps, episode
+            )
+            writer.add_scalar(
+                "Episode/AvgReward_HighSpeed", ep_high / episode_steps, episode
+            )
+            writer.add_scalar(
+                "Episode/AvgReward_OnRoad", ep_onroad / episode_steps, episode
             )
 
     # --- End of Training ---

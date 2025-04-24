@@ -59,10 +59,10 @@ def export_figures_from_event_file(event_file, run_name):
         # Plot individual scalar values using Seaborn
         plt.figure(figsize=(6, 6))
         sns.lineplot(
-            x=steps, y=values, label=f"{tag} (original)", alpha=0.6, color="black"
+            x=steps, y=values, label=f"{tag} (original)", alpha=0.3, color="blue"
         )
         sns.lineplot(
-            x=steps, y=smoothed_values, label=f"{tag} (smoothed)", color="black"
+            x=steps, y=smoothed_values, label=f"{tag} (smoothed)", color="blue"
         )
         plt.xlabel("Steps", fontsize=14)
         plt.ylabel("Value", fontsize=14)
@@ -83,10 +83,10 @@ def export_figures_from_event_file(event_file, run_name):
 
     for i, (tag, steps, values, smoothed_values) in enumerate(scalar_data):
         sns.lineplot(
-            ax=axes[i], x=steps, y=values, label="Original", alpha=0.6, color="black"
+            ax=axes[i], x=steps, y=values, label="Original", alpha=0.3, color="blue"
         )
         sns.lineplot(
-            ax=axes[i], x=steps, y=smoothed_values, label="Smoothed", color="black"
+            ax=axes[i], x=steps, y=smoothed_values, label="Smoothed", color="blue"
         )
         axes[i].set_title(tag, fontsize=14)
         axes[i].set_xlabel("Steps", fontsize=12)
