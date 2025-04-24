@@ -10,7 +10,7 @@ config_dict = {
     "observation": {
         "type": "OccupancyGrid",
         "vehicles_count": 10,
-        "features": ["presence", "x", "y", "vx", "vy", "cos_h", "sin_h"],
+        "features": ["presence", "x", "y", "vx", "vy", "cos_h", "sin_h", "on_road"],
         "features_range": {
             "x": [-100, 100],
             "y": [-100, 100],
@@ -20,36 +20,37 @@ config_dict = {
         "grid_size": [[-20, 20], [-20, 20]],
         "grid_step": [5, 5],
         "absolute": False,
+        "align_to_vehicle_axes": True,
     },
     "action": {
         "type": "ContinuousAction",
+        "steering_range": [-0.1, 0.1],
+        "acceleration_range": [-1, 1],
     },
-    "lanes_count": 4,
-    "vehicles_count": 15,
-    "duration": 60,  # [s]
-    "initial_spacing": 0,
-    "collision_reward": -1,  # The reward received when colliding with a vehicle.
-    "right_lane_reward": 0.5,  # The reward received when driving on the right-most lanes, linearly mapped to
-    # zero for other lanes.
-    "high_speed_reward": 0.1,  # The reward received when driving at full speed, linearly mapped to zero for
-    # lower speeds according to config["reward_speed_range"].
-    "lane_change_reward": 0,
-    "reward_speed_range": [
-        20,
-        30,
-    ],  # [m/s] The reward for high speed is mapped linearly from this range to [0, HighwayEnv.HIGH_SPEED_REWARD].
-    "simulation_frequency": 5,  # [Hz]
-    "policy_frequency": 1,  # [Hz]
+    "lanes_count": 8,
+    "vehicles_count": 10,  # Reduced to simplify the environment
+    "duration": 40,  # Shortened to allow quicker episodes
+    "initial_spacing": 1.0,  # Increased to prevent immediate interactions
+    "on_road_reward": 1.0,
+    "action_reward": -0.1,
+    "collision_reward": -1.0,
+    "right_lane_reward": 0.5,
+    "high_speed_reward": 1.0,  # Increased to encourage higher speeds
+    "lane_change_reward": -0.05,  # Slight penalty to discourage unnecessary lane changes
+    "reward_speed_range": [10, 30],  # Adjusted to match achievable speeds
+    "simulation_frequency": 15,  # Increased for finer control
+    "policy_frequency": 5,  # Increased to allow more frequent decisions
     "other_vehicles_type": "highway_env.vehicle.behavior.IDMVehicle",
-    "screen_width": 600,  # [px]
-    "screen_height": 150,  # [px]
+    "screen_width": 600,
+    "screen_height": 150,
     "centering_position": [0.3, 0.5],
     "scaling": 5.5,
     "show_trajectories": True,
     "render_agent": True,
     "offscreen_rendering": False,
-    "disable_collision_checks": True,
+    "offroad_terminal": False,  # Set to False to prevent early termination
 }
+
 
 if __name__ == "__main__":
     # Save the config_dict to a pickle file
