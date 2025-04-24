@@ -64,7 +64,7 @@ def train(
             if info["rewards"].get("on_road_reward", 1) == 0:
                 reward += -1.0
 
-            agent.store(env.unwrapped.crashedstate, action, reward, value, logp)
+            agent.store(state, action, reward, value, logp)
 
             ep_reward += reward
             ep_steps += 1
