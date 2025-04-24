@@ -19,7 +19,7 @@ os.makedirs("benchmark_results", exist_ok=True)
 test_envs = ["CartPole-v1"]
 
 # Training parameters
-n_episodes = 20_000
+n_episodes = 2_000
 eval_interval = 50
 eval_episodes = 10
 
@@ -135,7 +135,7 @@ for env_name in test_envs:
         act_dim = env.action_space.shape[0]
 
     # Initialize your PPO agent
-    agent = ppo.PPOAgent(obs_dim=obs_dim, act_dim=act_dim, model_type="lstm")
+    agent = ppo.PPOAgent(obs_dim=obs_dim, act_dim=act_dim)
 
     # Lists to store training progress
     episode_rewards = []

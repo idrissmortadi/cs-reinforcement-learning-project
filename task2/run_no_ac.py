@@ -7,7 +7,7 @@ from datetime import datetime
 import gymnasium as gym
 import numpy as np
 import torch
-from ppo import PPOAgent
+from no_ac_PPO import PPOPolicyOnlyAgent as PPOAgent
 
 # For accessing the config module;
 sys.path.append(os.path.abspath(os.path.join(__file__, os.pardir, os.pardir)))
@@ -56,7 +56,8 @@ def train(
         done = False
         episode_pbar.set_description("Collecting observations...")
         while not done:
-            action, value, logp = agent.select_action(state)
+            # action, value, logp = agent.select_action(state)
+            action, logp = agent.select_action(state)
             next_state, reward, terminated, truncated, info = env.step(action)
             next_state = next_state.flatten()
             done = terminated or truncated
@@ -64,7 +65,8 @@ def train(
             if info["rewards"].get("on_road_reward", 1) == 0:
                 reward += -1.0
 
-            agent.store(env.unwrapped.crashedstate, action, reward, value, logp)
+            # agent.store(state, action, reward, value, logp)
+            agent.store(state, action, reward, logp)
 
             ep_reward += reward
             ep_steps += 1
@@ -82,11 +84,13 @@ def train(
             total_env_steps += 1
 
             if done:
-                last_val = 0
-                agent.finish_path(last_val)
+                # last_val = 0
+                # agent.finish_path(last_val)
+                agent.finish_path()
 
             if total_env_steps % agent.buf.max_size == 0:
-                agent.finish_path(last_val if not done else 0)
+                # agent.finish_path(last_val if not done else 0)
+                agent.finish_path()
                 episode_pbar.set_description("Updating agent...")
                 agent.update()
 
@@ -178,7 +182,8 @@ def evaluate_agent(agent: PPOAgent, env: gym.Env, num_episodes: int = 5) -> floa
 
         while not done:
             with torch.no_grad():
-                action, _, _ = agent.select_action(state)
+                # action, _, _ = agent.select_action(state)
+                action, _ = agent.select_action(state)
             state, reward, terminated, truncated, info = env.step(action)
             state = state.flatten()
 
@@ -230,7 +235,8 @@ def record_agent(agent: PPOAgent, env, run_name, num_eval_episodes=4):
 
         while not done:
             with torch.no_grad():
-                action, _, _ = agent.select_action(state)
+                # action, _, _ = agent.select_action(state)
+                action, _ = agent.select_action(state)
             state, reward, terminated, truncated, info = env.step(action)
 
             if info["rewards"].get("on_road_reward", 1) == 0:
@@ -336,9 +342,9 @@ def main():
         np.prod(observation_space.shape),
         action_space.shape[0],
         gamma=gamma,
-        lam=lambda_,
+        # lam=lambda_,
         pi_lr=actor_learning_rate,
-        vf_lr=critic_learning_rate,
+        # vf_lr=critic_learning_rate,
         clip_ratio=0.05,
     )
 
