@@ -1,90 +1,261 @@
-# Reinforcement Learning Project
+# Highway Reinforcement Learning Project
 
-This repository contains the implementation of a Reinforcement Learning (RL) project. The project is structured into multiple tasks, each focusing on a specific aspect of RL. Currently, only **Task 1** is implemented, with plans to add **Task 2**, **Task 3**, and **Task 4** in the future.
+A comprehensive implementation of various reinforcement learning algorithms applied to autonomous driving scenarios using the `highway-env` suite. This project explores different aspects of RL, from discrete to continuous action spaces and parameter sensitivity analysis.
 
 ## Table of Contents
-- [Environment Setup](#environment-setup)
-- [Task 1: Training a DQN Agent](#task-1-training-a-dqn-agent)
-  - [Overview](#overview)
-  - [Running the Training Script](#running-the-training-script)
-  - [Evaluating the Agent](#evaluating-the-agent)
-  - [Visualizing Results](#visualizing-results)
-- [Future Tasks](#future-tasks)
 
----
+- [Environment Setup](#environment-setup)
+- [Project Structure](#project-structure)
+- [Task 1: Discrete DQN Agent](#task-1-discrete-dqn-agent)
+  - [Overview](#task-1-overview)
+  - [Running the Training](#task-1-running-the-training)
+  - [Evaluating the Agent](#task-1-evaluating-the-agent)
+- [Task 2: Continuous PPO Agent](#task-2-continuous-ppo-agent)
+  - [Overview](#task-2-overview)
+  - [Running the Training](#task-2-running-the-training)
+  - [Benchmarking](#task-2-benchmarking)
+- [Task 3: Racetrack Environment](#task-3-racetrack-environment)
+  - [Overview](#task-3-overview)
+  - [Training Methods](#task-3-training-methods)
+  - [Testing the Agent](#task-3-testing-the-agent)
+- [Task 4: Reward Parameter Analysis](#task-4-reward-parameter-analysis)
+  - [Overview](#task-4-overview)
+  - [Running the Experiments](#task-4-running-the-experiments)
+  - [Analyzing Results](#task-4-analyzing-results)
+- [Visualization Tools](#visualization-tools)
+- [Contributors](#contributors)
 
 ## Environment Setup
 
-1. Install the required dependencies using the provided `environment.yml` file:
+1. Create and activate the conda environment using the provided `environment.yml` file:
    ```bash
    conda env create -f environment.yml
    conda activate RL
    ```
 
-2. Ensure all configurations are properly set up in the `configs/` directory.
+2. Verify installation by running one of the test scripts:
+   ```bash
+   python configs/test_configs.py
+   ```
 
----
+## Project Structure
 
-## Task 1: Training a DQN Agent
+The project is organized around four main tasks, each exploring different aspects of reinforcement learning:
 
-### Overview
-In Task 1, we train a Deep Q-Network (DQN) agent to perform well in the `highway-fast-v0` environment. The agent learns to navigate a highway while maximizing rewards and avoiding collisions. The environment is configured using the `configs/task_1_config.py` file.
-
-### Running the Training Script
-
-To train the DQN agent, run the following command:
-```bash
-python task1/run.py
+```
+configs/                  # Environment configurations
+├── task_1_config.py      # Discrete highway config
+├── task_2_config.py      # Continuous highway config
+├── task_3_config.py      # Racetrack environment config
+├── membres_groupe.txt    # Contributors list
+task_1/                   # DQN implementation
+task_2/                   # PPO implementation
+task_3/                   # Racetrack environment tasks
+task_4/                   # Parameter analysis experiments
 ```
 
-- The script will:
-  - Initialize the environment and networks.
-  - Train the agent for the specified number of episodes.
-  - Save the trained model and metrics in the `results/` directory.
+## Task 1: Discrete DQN Agent {#task-1-discrete-dqn-agent}
 
-### Evaluating the Agent
+### Overview {#task-1-overview}
 
-To evaluate the trained agent and record its performance, use the `play_or_record.py` script:
+Task 1 implements a Deep Q-Network (DQN) agent to navigate a highway environment with discrete actions. The agent uses:
+
+- Experience replay buffer to store and sample past interactions
+- Target network to stabilize training
+- Epsilon-greedy exploration strategy
+- Occupancy grid observations of the surrounding area
+
+The environment (`highway-fast-v0`) features:
+
+- 4 lane highway with traffic
+- Discrete action space (lane changes, speed adjustments)
+- Rewards for right-lane preference, high speed, and penalties for collisions
+
+### Running the Training {#task-1-running-the-training}
+
+To train the DQN agent:
+
 ```bash
-python task1/play_or_record.py --model <path_to_model> --video_folder <path_to_videos> --num_episodes 5
+cd task_1
+python run.py
 ```
-- Replace `<path_to_model>` with the path to the saved model (e.g., `results/models/dqn_policy_net_task1_final.pth`).
-- Replace `<path_to_videos>` with the directory where videos should be saved.
-- Add the `--live` flag to play the environment live instead of recording.
 
-### Visualizing Results
+The script will:
+
+- Initialize the environment and networks
+- Train the agent for a specified number of episodes (default: 1000)
+- Save the model at regular intervals and after training
+- Log metrics to TensorBoard
+- Record evaluation videos after training
+
+Key hyperparameters can be found in `task_1/hyperparameters.py`.
+
+### Evaluating the Agent {#task-1-evaluating-the-agent}
+
+To evaluate a trained agent and record its performance:
+
+```bash
+python task_1/play_or_record.py --model results/models/dqn_policy_net_task1_final.pth --video_folder results/videos --num_episodes 5
+```
+
+Add the `--live` flag to watch the agent in real-time instead of recording videos.
+
+## Task 2: Continuous PPO Agent {#task-2-continuous-ppo-agent}
+
+### Overview {#task-2-overview}
+
+Task 2 explores continuous control using Proximal Policy Optimization (PPO) in the same highway environment. Key features:
+
+- Continuous steering and acceleration actions
+- Policy and value networks for actor-critic architecture
+- GAE (Generalized Advantage Estimation) for advantage calculation
+- Support for both actor-critic and policy-only implementations
+
+The environment is configured with:
+
+- 8 lanes for more complex navigation
+- Detailed reward shaping for safe and efficient driving
+- Higher simulation frequency for smoother control
+
+### Running the Training {#task-2-running-the-training}
+
+To train the PPO agent:
+
+```bash
+cd task_2
+python run.py --episodes 1280 --record_every 32
+```
+
+Options include:
+
+- `--run_name`: Custom name for the training run
+- `--gamma`: Discount factor (default: 0.99)
+- `--actor_lr`: Learning rate for the actor network
+- `--critic_lr`: Learning rate for the critic network
+- `--lambda_`: GAE lambda parameter
+
+For the version without actor-critic:
+
+```bash
+python run_no_ac.py
+```
+
+### Benchmarking {#task-2-benchmarking}
+
+Task 2 includes benchmarking capabilities:
+
+```bash
+python task_2/benchmark.py
+```
+
+This will compare the performance against other algorithms on standard environments.
+
+## Task 3: Racetrack Environment {#task-3-racetrack-environment}
+
+### Overview {#task-3-overview}
+
+Task 3 moves to a more challenging `racetrack-v0` environment, requiring precise control to navigate curved tracks. Features:
+
+- Complex racetrack navigation with lane centering and collision avoidance
+- Off-road detection and termination
+- More challenging reward structure with penalties for off-track driving
+
+### Training Methods {#task-3-training-methods}
+
+Two training approaches are implemented:
+
+1. PPO (Proximal Policy Optimization):
+
+```bash
+cd task_3
+python ppo_plot_figs.py
+```
+
+2. A2C (Advantage Actor-Critic):
+
+```bash
+python ac_plot_figs.py
+```
+
+Both implementations utilize:
+
+- Parallelized training with multiple environments
+- TensorBoard logging with detailed metrics
+- Visualization tools for training progress
+
+### Testing the Agent {#task-3-testing-the-agent}
+
+To evaluate a trained agent on the racetrack:
+
+```bash
+python task_3/test_agent.py
+```
+
+This script loads a saved model and runs evaluation episodes, recording videos of the agent's performance.
+
+## Task 4: Reward Parameter Analysis {#task-4-reward-parameter-analysis}
+
+### Overview {#task-4-overview}
+
+Task 4 conducts systematic experiments on how reward parameters affect agent behavior. Using the DQN algorithm from Task 1, it analyzes:
+
+- The impact of `right_lane_reward` parameter (-0.5, 0, 0.5, 1.0)
+- How reward shaping influences lane preference, speed, and collision rates
+- Trade-offs between safety (avoiding collisions) and efficiency (maintaining speed)
+
+### Running the Experiments {#task-4-running-the-experiments}
+
+The experiments are implemented in a Jupyter notebook:
+
+```bash
+jupyter lab task_4/task4.ipynb
+```
+
+The notebook will:
+
+1. Train DQN agents with different reward configurations
+2. Evaluate each agent in controlled test environments
+3. Collect metrics on lane occupancy, speed, and collision rates
+
+### Analyzing Results {#task-4-analyzing-results}
+
+The notebook generates visualizations including:
+
+- Lane distribution plots showing preferred lanes for each reward setting
+- Collision rate analysis across different reward parameters
+- Speed-safety trade-off scatter plots
+- Behavior profile radar charts
+
+These visualizations are saved in the `task_4/figures/` directory.
+
+## Visualization Tools
+
+Several tools for visualizing training progress and results:
 
 1. **TensorBoard**:
-   - Training metrics (e.g., loss, rewards) are logged to TensorBoard.
-   - To view the logs, run:
-     ```bash
-     tensorboard --logdir results/tensorboard
-     ```
-   - Open the provided URL in your browser.
 
-2. **Exporting Figures**:
-   - Use the `export_run_figures.py` script to generate plots from TensorBoard logs:
-     ```bash
-     python task1/export_run_figures.py <path_to_event_file> <run_name>
-     ```
-   - Replace `<path_to_event_file>` with the path to the TensorBoard event file.
-   - Replace `<run_name>` with a name for the output directory.
+   ```bash
+   tensorboard --logdir task[i]/results/tensorboard
+   ```
 
----
+2. **Exporting Figures** (Task 1):
 
-## Future Tasks
+   ```bash
+   python task_1/export_run_figures.py <path_to_event_file> <run_name>
+   ```
 
-### Task 2: Continuous Action Space
-- Train an agent in a continuous action space environment (`highway-fast-v0`).
-- Use the configuration in `configs/task_2_config.py`.
+3. **Training Plots** (Task 3):
 
-### Task 3: Advanced Environment
-- Train an agent in a more complex environment (`racetrack-v0`).
-- Use the configuration in `configs/task_3_config.py`.
+   ```bash
+   python task_3/ppo_plot_figs.py  # For PPO metrics
+   python task_3/ac_plot_figs.py   # For A2C metrics
+   ```
 
-### Task 4: TBD
-- Details will be added in the future.
+## Contributors
 
----
+Project contributors are listed in `configs/membres_groupe.txt`:
 
-For any questions or issues, feel free to contact the contributors listed in `configs/membres_groupe.txt`.
+- Idriss MORTADI
+- Abdellah OUMIDA
+- Abdelaziz GUELFANE
+- Aymane LOTFI
